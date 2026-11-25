@@ -125,6 +125,39 @@ function verifySeal(db: DB): boolean {
   return row.tampered === 1;
 }
 
+/**
+ * Seal check for outside readers (the dashboard) that open the DB read-only.
+ * Never writes and never creates a key file.
+ */
+export function verifyLedgerSealReadOnly(db: DB): "ok" | "tampered" | "no_key" | "no_ledger" {
+  try {
+    const row = db.prepare("SELECT seal, tampered FROM paper_seal WHERE id = 1").get() as
+      | { seal: string; tampered: number }
+      | undefined;
+    if (!row) return "no_ledger";
+    if (row.tampered === 1) return "tampered";
+    if (!injectedSealKey && !cachedSealKey && !fs.existsSync(getLedgerKeyPath())) return "no_key";
+    const expected = ledgerDigest(db);
+    return row.seal === expected ? "ok" : "tampered";
+  } catch {
+    return "no_ledger";
+  }
+}
+
+/** Append an equity sample for charts, at most one per `minIntervalMs`. Not part of the seal. */
+export function recordEquitySample(db: DB, equity: number, leverage: number, minIntervalMs = 60_000): void {
+  const last = db.prepare("SELECT time FROM paper_equity_history ORDER BY time DESC LIMIT 1").get() as
+    | { time: string }
+    | undefined;
+  const now = new Date();
+  if (last && now.getTime() - new Date(last.time).getTime() < minIntervalMs) return;
+  db.prepare("INSERT OR REPLACE INTO paper_equity_history (time, equity, leverage) VALUES (?, ?, ?)").run(
+    now.toISOString(),
+    equity,
+    Number.isFinite(leverage) ? leverage : 0,
+  );
+}
+
 /** Read-only check used by status code. */
 export function isLedgerTampered(db: DB): boolean {
   return db.transaction(() => verifySeal(db))();
@@ -170,6 +203,11 @@ export function ensurePaperSchema(db: DB, cfg: TradingConfig): void {
       price REAL NOT NULL,
       as_of TEXT NOT NULL,
       fetched_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS paper_equity_history (
+      time TEXT PRIMARY KEY,
+      equity REAL NOT NULL,
+      leverage REAL NOT NULL
     );
     CREATE TABLE IF NOT EXISTS paper_seal (
       id INTEGER PRIMARY KEY CHECK (id = 1),

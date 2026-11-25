@@ -13,6 +13,7 @@ import {
   getFills,
   getPosition,
   getSnapshot,
+  recordEquitySample,
   recordQuote,
 } from "./ledger.js";
 import { getPriceProvider, isMarketOpen, normalizeSymbol } from "./market-data.js";
@@ -82,7 +83,9 @@ export async function refreshPaperAccount(
     }
   }
   const liquidations = enforceMarginCall(db, cfg);
-  return { snapshot: getSnapshot(db, cfg), liquidations, quoteErrors };
+  const snapshot = getSnapshot(db, cfg);
+  recordEquitySample(db, snapshot.equity, snapshot.leverage);
+  return { snapshot, liquidations, quoteErrors };
 }
 
 function parseOrderArgs(args: Record<string, unknown>): { symbol: string; side: OrderSide; quantity: number } | string {

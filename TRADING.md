@@ -134,6 +134,45 @@ credits and cannot be deleted. The defaults allow at most 2 per rolling
 The ledger, its key, the risk code and the trading rules are also on the
 protected-files list.
 
+## Live dashboard
+
+A live web dashboard shows what the agent is doing. It refreshes every 3 seconds and shows:
+- equity, today's P&L, leverage, cash and realized P&L
+- an equity chart, sampled about once a minute while the agent runs
+- open positions and recent trades
+- recent turns: what it was thinking and each tool call with its result
+- orders and commands blocked by policy
+- the trade journal (`~/.automaton/journal.md`)
+- whether the ledger seal is intact
+
+Start it on the machine where the automaton runs, in a second terminal:
+
+```bash
+npm run build
+npm run dashboard            # or: node dist/dashboard/server.js
+# → open http://127.0.0.1:4747/
+```
+
+It opens `state.db` **read-only**, so watching cannot disturb the ledger seal.
+
+Options:
+- `--port 4747`
+- `--host 127.0.0.1`
+- `--token <secret>`
+- `--db <path>`
+
+**Seeing it from another computer.** The dashboard listens on localhost
+only by default. The safest way to reach it is an SSH tunnel from your
+computer: `ssh -L 4747:127.0.0.1:4747 <server>`, then open
+http://127.0.0.1:4747/ locally.
+
+To listen on another host instead, you must set a token, and the URL needs
+it as `?token=`:
+
+```bash
+node dist/dashboard/server.js --host 0.0.0.0 --token "$(openssl rand -hex 16)"
+```
+
 ## Market data
 
 Prices come from Yahoo Finance's public chart endpoint
