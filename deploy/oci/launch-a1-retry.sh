@@ -29,10 +29,15 @@ if [ -z "$COMPARTMENT" ]; then
 fi
 
 echo "==> SSH key"
-if [ ! -f "$KEY" ]; then
+if [ ! -f "$KEY" ] || [ ! -f "$KEY.pub" ]; then
   mkdir -p "$(dirname "$KEY")"
-  ssh-keygen -t ed25519 -N "" -f "$KEY" -C "$NAME" >/dev/null
-  echo "    created $KEY (private key stays in your Cloud Shell)"
+  rm -f "$KEY" "$KEY.pub"
+  # Cloud Shell runs in FIPS mode, which rejects ed25519; RSA is allowed.
+  if ! ssh-keygen -t rsa -b 4096 -N "" -f "$KEY" -C "$NAME" >/dev/null || [ ! -f "$KEY.pub" ]; then
+    echo "Could not create an SSH key at $KEY." >&2
+    exit 1
+  fi
+  echo "    created $KEY (RSA; private key stays in your Cloud Shell)"
 else
   echo "    using existing $KEY"
 fi
@@ -57,7 +62,7 @@ echo "    subnet: $SUBNET_NAME"
 echo "    image:  $(oci compute image get --image-id "$IMAGE" --query 'data."display-name"' --raw-output)"
 
 existing="$(oci compute instance list --compartment-id "$COMPARTMENT" --all \
-  --query "data[?\"display-name\"=='$NAME' && \"lifecycle-state\"!='TERMINATED'] | [0].id" --raw-output)"
+  --query "data[?\"display-name\"=='$NAME' && \"lifecycle-state\"!='TERMINATED'] | [0].id" --raw-output 2>/dev/null)"
 if [ -n "$existing" ] && [ "$existing" != "null" ]; then
   echo "An instance named '$NAME' already exists ($existing). Not creating another." >&2
   exit 1
