@@ -8,7 +8,7 @@
 #   OCPUS=2 MEMORY_GB=12        shape size (Always Free A1 total: 2 OCPU / 12 GB)
 #   NAME=jeson-007              instance name
 #   SUBNET_NAME=hermes-public-subnet
-#   WAIT_SECONDS=180            pause between attempts
+#   WAIT_SECONDS=60             pause between attempts (OCI may rate-limit below ~60)
 #   KEY=~/.ssh/jeson007         SSH key pair (created here if missing)
 #
 # Stop it any time with Ctrl-C. Keep the Cloud Shell tab open while it runs.
@@ -18,7 +18,7 @@ OCPUS="${OCPUS:-2}"
 MEMORY_GB="${MEMORY_GB:-12}"
 NAME="${NAME:-jeson-007}"
 SUBNET_NAME="${SUBNET_NAME:-hermes-public-subnet}"
-WAIT_SECONDS="${WAIT_SECONDS:-180}"
+WAIT_SECONDS="${WAIT_SECONDS:-60}"
 KEY="${KEY:-$HOME/.ssh/jeson007}"
 SHAPE="VM.Standard.A1.Flex"
 
@@ -72,7 +72,8 @@ attempt=0
 while true; do
   attempt=$((attempt + 1))
   echo "==> Attempt $attempt at $(date -u +%H:%M:%S) UTC: $SHAPE ${OCPUS} OCPU / ${MEMORY_GB} GB"
-  out="$(oci compute instance launch \
+  # --no-retry: fail fast on "out of capacity" instead of the CLI's own long internal retries
+  out="$(oci --no-retry compute instance launch \
     --availability-domain "$AD" \
     --compartment-id "$COMPARTMENT" \
     --display-name "$NAME" \

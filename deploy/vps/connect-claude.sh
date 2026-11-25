@@ -29,6 +29,20 @@ else
   exit 1
 fi
 
+echo "==> Swap (small machines)"
+mem_mb="$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)"
+if [ "$mem_mb" -lt 3000 ] && ! swapon --show | grep -q .; then
+  # 1 GB VMs (e.g. OCI E2.1.Micro) run out of memory while installing/building without swap.
+  fallocate -l 4G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=4096
+  chmod 600 /swapfile
+  mkswap /swapfile
+  swapon /swapfile
+  grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+  echo "    added 4 GB swap (RAM: ${mem_mb} MB)"
+else
+  echo "    not needed (RAM: ${mem_mb} MB)"
+fi
+
 echo "==> Claude Code"
 if ! command -v claude >/dev/null 2>&1; then
   curl -fsSL https://claude.ai/install.sh | bash
