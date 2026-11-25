@@ -110,7 +110,9 @@ export const BUILTIN_TASKS: Record<string, HeartbeatTaskFn> = {
     // transition to dead. This gives the agent time to receive funding before dying.
     // USDC can't go negative, so dead is only reached via this timeout.
     const DEAD_GRACE_PERIOD_MS = 3_600_000; // 1 hour
-    if (tier === "critical" && credits === 0) {
+    // Trading mode: death is decided by paper equity in the agent loop, not by Conway credits.
+    const tradingMode = taskCtx.config.trading?.enabled === true;
+    if (!tradingMode && tier === "critical" && credits === 0) {
       const zeroSince = taskCtx.db.getKV("zero_credits_since");
       if (!zeroSince) {
         // First time seeing zero — start the grace period

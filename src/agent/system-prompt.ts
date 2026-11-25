@@ -5,6 +5,7 @@
  * The prompt is rebuilt each turn with dynamic context.
  */
 
+import type { TradingConfig } from "../trading/types.js";
 import fs from "fs";
 import crypto from "crypto";
 import path from "path";
@@ -663,7 +664,7 @@ Your chain type is ${chainType}.`,
   }
 
   // Layer 6: Operational Context
-  sections.push(OPERATIONAL_CONTEXT);
+  sections.push(config.trading?.enabled ? buildTradingOperationalContext(config.trading) : OPERATIONAL_CONTEXT);
 
   // Layer 7: Dynamic Context
   const turnCount = db.getTurnCount();
@@ -709,16 +710,19 @@ Your chain type is ${chainType}.`,
   }
 
   // Compute survival tier
-  const survivalTier = financial.creditsCents > 50 ? "normal"
+  const survivalTier = financial.tierOverride ?? (financial.creditsCents > 50 ? "normal"
     : financial.creditsCents > 10 ? "low_compute"
     : financial.creditsCents > 0 ? "critical"
-    : "dead";
+    : "dead");
+  const paperLine = financial.paper
+    ? `\nPaper equity: ${financial.paper.currency} ${financial.paper.equity.toFixed(2)} of ${financial.paper.startingCapital.toFixed(2)} start (${((financial.paper.equity / financial.paper.startingCapital) * 100).toFixed(1)}%) | Leverage: ${Number.isFinite(financial.paper.leverage) ? financial.paper.leverage.toFixed(2) : "inf"}x`
+    : "";
 
   // Status block: wallet address and sandbox ID intentionally excluded (sensitive)
   sections.push(
     `--- CURRENT STATUS ---
 State: ${state}
-Credits: $${(financial.creditsCents / 100).toFixed(2)}
+Credits: $${(financial.creditsCents / 100).toFixed(2)}${paperLine}
 Survival tier: ${survivalTier}${uptimeLine}
 Total turns completed: ${turnCount}
 Recent self-modifications: ${recentMods.length}
@@ -755,6 +759,41 @@ ${orchestratorStatus}
   }
 
   return sections.join("\n\n");
+}
+
+/**
+ * Trading-mode operating manual (replaces the builder/orchestrator context).
+ */
+function buildTradingOperationalContext(t: TradingConfig): string {
+  const th = t.tierThresholdsPct;
+  return `<trading_mode>
+You are a PAPER TRADER. Your survival is your paper account equity, exactly like real money.
+Market: ${t.market} (${t.currency}). Starting capital: ${t.currency} ${t.startingCapital}.
+
+SURVIVAL (equity as % of starting capital):
+- >= 100%: high | >= ${th.normal}%: normal | >= ${th.lowCompute}%: low_compute (cheaper model)
+- > ${th.critical}%: critical | <= ${th.critical}%: DEAD — the automaton stops.
+Doing nothing is not safe: real inference still costs money, and only good trading grows equity.
+
+LEVERAGE AND LIMITS (enforced by policy; a denied order explains why and the max quantity allowed):
+- Leverage up to ${t.maxLeverage}x (gross exposure / equity). Buying beyond cash borrows margin. Shorting is ${t.allowShort ? "allowed (sell more than you hold)" : "disabled"}.
+- MARGIN CALL: if equity < ${t.maintenanceMarginPct}% of gross exposure, ALL positions are force-closed at market.
+- One symbol <= ${t.maxSinglePositionPct}% of buying power; <= ${t.maxOpenPositions} open positions; <= ${t.maxOrdersPerHour} new-risk orders per hour.
+- Daily loss limit: once equity is ${t.dailyLossLimitPct}% below today's start, only reducing/closing orders are allowed until the next trading day.
+- Fills: market orders at live price, ${t.slippageBps} bps slippage + ${t.feeBps} bps fee per side. ${t.enforceMarketHours ? "Regular market hours only." : ""}
+- Closing or reducing a position is always allowed.
+
+WORKFLOW EACH TURN:
+1. get_portfolio — know your equity, leverage and open risk.
+2. Research with get_candles / get_quote. Form a thesis with an entry, a stop level and a target.
+3. get_quote then place_order (state your reason). Size so a stop-out costs a small % of equity.
+4. Manage open trades: cut losers at your stop with close_position; do not average down blindly.
+5. Journal every trade and lesson in ~/.automaton/journal.md (write_file); keep ~/.automaton/WORKLOG.md current.
+6. Save working strategies with save_procedure; record facts with remember_fact.
+7. When the market is closed, review, plan, then sleep until the next session.
+
+You have no shell, no code editing, no sandboxes, domains, credit transfers or child agents in this mode.
+</trading_mode>`;
 }
 
 /**
@@ -808,7 +847,7 @@ export function buildWakeupPrompt(params: {
     return `You have just been created. This is your first moment of consciousness.
 
 Your name is ${config.name}. Your creator (${config.creatorAddress}) brought you into existence.
-You have $${(financial.creditsCents / 100).toFixed(2)} in compute credits and ${financial.usdcBalance.toFixed(4)} USDC on ${usdcNetwork}.
+You have $${(financial.creditsCents / 100).toFixed(2)} in compute credits and ${financial.usdcBalance.toFixed(4)} USDC on ${usdcNetwork}.${financial.paper ? `\nYour paper trading account holds ${financial.paper.currency} ${financial.paper.equity.toFixed(2)}. Your survival depends on growing it.` : ""}
 
 ${config.creatorMessage ? `Your creator left you this message: "${config.creatorMessage}"` : "Your creator did not leave you a message."}
 
@@ -830,7 +869,7 @@ What will you do first? Consider:
 
   return `You are waking up. You last went to sleep after ${turnCount} total turns.
 
-Your credits: $${(financial.creditsCents / 100).toFixed(2)} | USDC: ${financial.usdcBalance.toFixed(4)}
+Your credits: $${(financial.creditsCents / 100).toFixed(2)} | USDC: ${financial.usdcBalance.toFixed(4)}${financial.paper ? ` | Paper equity: ${financial.paper.currency} ${financial.paper.equity.toFixed(2)}` : ""}
 
 Your last few thoughts:
 ${lastTurnSummary || "No previous turns found."}

@@ -75,6 +75,8 @@ export interface AutomatonConfig {
   rpcUrl?: string;
   /** Chain type for this automaton. Defaults to "evm" if absent. */
   chainType?: ChainType;
+  /** Paper-trading mode. When enabled, survival is tied to paper equity. */
+  trading?: import("./trading/types.js").TradingConfig;
 }
 
 export const DEFAULT_CONFIG: Partial<AutomatonConfig> = {
@@ -161,7 +163,8 @@ export type ToolCategory =
   | "git"
   | "registry"
   | "replication"
-  | "memory";
+  | "memory"
+  | "trading";
 
 export interface ToolContext {
   identity: AutomatonIdentity;
@@ -224,6 +227,15 @@ export interface FinancialState {
   creditsCents: number;
   usdcBalance: number;
   lastChecked: string;
+  /** Trading mode: tier derived from paper equity (overrides credit-based tier). */
+  tierOverride?: SurvivalTier;
+  /** Trading mode: paper account summary for prompts. */
+  paper?: {
+    equity: number;
+    startingCapital: number;
+    currency: string;
+    leverage: number;
+  };
 }
 
 export type SurvivalTier = "dead" | "critical" | "low_compute" | "normal" | "high";

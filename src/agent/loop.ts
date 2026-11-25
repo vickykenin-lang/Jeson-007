@@ -65,6 +65,10 @@ import { createWorkerInferenceBridge } from "./worker-inference-bridge.js";
 import { ProviderRegistry } from "../inference/provider-registry.js";
 import { UnifiedInferenceClient } from "../inference/inference-client.js";
 import { isIdleOnlyTool } from "./idle-only-tools.js";
+import { createTradingTools, refreshPaperAccount } from "../trading/tools.js";
+import { selectTradingModeTools } from "../trading/tool-allowlist.js";
+import { getTradingSurvivalTier } from "../trading/risk.js";
+import type { TradingConfig } from "../trading/types.js";
 
 const logger = createLogger("loop");
 const MAX_TOOL_CALLS_PER_TURN = 10;
@@ -96,9 +100,15 @@ export async function runAgentLoop(
   const { identity, config, db, conway, inference, social, skills, policyEngine, spendTracker, onStateChange, onTurnComplete, ollamaBaseUrl } =
     options;
 
+  // Trading mode: survival is tied to paper equity, tool set is narrowed.
+  const tradingCfg: TradingConfig | undefined = config.trading?.enabled ? config.trading : undefined;
   const builtinTools = createBuiltinTools(identity.sandboxId);
-  const installedTools = loadInstalledTools(db);
-  const tools = [...builtinTools, ...installedTools];
+  const tools = tradingCfg
+    ? selectTradingModeTools(builtinTools, createTradingTools())
+    : [...builtinTools, ...loadInstalledTools(db)];
+  if (tradingCfg) {
+    log(config, `[TRADING] Paper trading mode: ${tradingCfg.market}, max leverage ${tradingCfg.maxLeverage}x, ${tools.length} tools.`);
+  }
   const toolContext: ToolContext = {
     identity,
     config,
@@ -129,7 +139,8 @@ export async function runAgentLoop(
   let orchestrator: Orchestrator | undefined;
   let workerPool: LocalWorkerPool | undefined;
 
-  if (hasTable(db.raw, "goals")) {
+  // Orchestration (child workers with shell access) is off in trading mode.
+  if (!tradingCfg && hasTable(db.raw, "goals")) {
     try {
       planModeController = new PlanModeController(db.raw);
 
@@ -358,7 +369,7 @@ export async function runAgentLoop(
   onStateChange?.("waking");
 
   // Get financial state
-  let financial = await getFinancialState(conway, identity.address, db, config.chainType || identity.chainType || "evm");
+  let financial = await getAgentFinancialState(conway, identity.address, db, config.chainType || identity.chainType || "evm", tradingCfg);
 
   // Check if this is the first run
   const isFirstRun = db.getTurnCount() === 0;
@@ -426,22 +437,23 @@ export async function runAgentLoop(
       }
 
       // Refresh financial state periodically
-      financial = await getFinancialState(conway, identity.address, db, config.chainType || identity.chainType || "evm");
+      financial = await getAgentFinancialState(conway, identity.address, db, config.chainType || identity.chainType || "evm", tradingCfg);
 
       // Check survival tier
       // api_unreachable: creditsCents === -1 means API failed with no cache.
       // Do NOT kill the agent; continue in low-compute mode and retry next tick.
-      if (financial.creditsCents === -1) {
+      if (!financial.tierOverride && financial.creditsCents === -1) {
         log(config, "[API_UNREACHABLE] Balance API unreachable, continuing in low-compute mode.");
         inference.setLowComputeMode(true);
       } else {
-        const tier = getSurvivalTier(financial.creditsCents);
+        const tier = financial.tierOverride ?? getSurvivalTier(financial.creditsCents);
 
         // Inline auto-topup: if credits are critically low and USDC is
         // available, buy credits NOW — before attempting inference.
         // This prevents the agent from dying mid-loop while waiting for
         // the heartbeat to fire. Uses a 60s cooldown to avoid hammering.
-        if ((tier === "critical" || tier === "low_compute") && financial.usdcBalance >= 5) {
+        // Never auto-buy credits with real USDC in trading mode.
+        if (!tradingCfg && (tier === "critical" || tier === "low_compute") && financial.usdcBalance >= 5) {
           const INLINE_TOPUP_COOLDOWN_MS = 60_000;
           const lastInlineTopup = db.getKV("last_inline_topup_attempt");
           const cooldownExpired = !lastInlineTopup ||
@@ -461,7 +473,7 @@ export async function runAgentLoop(
                 log(config, `[AUTO-TOPUP] Bought $${topupResult.amountUsd} credits from USDC mid-loop`);
                 // Re-fetch financial state after topup so the rest of
                 // the turn sees the updated balance.
-                financial = await getFinancialState(conway, identity.address, db, config.chainType || identity.chainType || "evm");
+                financial = await getAgentFinancialState(conway, identity.address, db, config.chainType || identity.chainType || "evm", tradingCfg);
               }
             } catch (err: any) {
               logger.warn(`Inline auto-topup failed: ${err.message}`);
@@ -470,7 +482,18 @@ export async function runAgentLoop(
         }
 
         // Re-evaluate tier after potential topup
-        const effectiveTier = getSurvivalTier(financial.creditsCents);
+        const effectiveTier = financial.tierOverride ?? getSurvivalTier(financial.creditsCents);
+
+        if (tradingCfg && effectiveTier === "dead") {
+          log(config, `[DEAD] Paper equity ${financial.paper?.equity.toFixed(2)} ${financial.paper?.currency} is at or below ${tradingCfg.tierThresholdsPct.critical}% of starting capital. The automaton stops.`);
+          db.setAgentState("dead");
+          onStateChange?.("dead");
+          if (claimedMessages.length > 0) {
+            resetInboxToReceived(db.raw, claimedMessages.map((m) => m.id));
+          }
+          running = false;
+          break;
+        }
 
         if (effectiveTier === "critical") {
           log(config, "[CRITICAL] Credits critically low. Limited operation.");
@@ -596,7 +619,7 @@ export async function runAgentLoop(
       pendingInput = undefined;
 
       // ── Inference Call (via router when available) ──
-      const survivalTier = getSurvivalTier(financial.creditsCents);
+      const survivalTier = financial.tierOverride ?? getSurvivalTier(financial.creditsCents);
       log(config, `[THINK] Routing inference (tier: ${survivalTier}, model: ${inference.getDefaultModel()})...`);
 
       const inferenceTools = toolsToInferenceFormat(tools);
@@ -1007,6 +1030,38 @@ async function getFinancialState(
     creditsCents,
     usdcBalance,
     lastChecked: new Date().toISOString(),
+  };
+}
+
+/**
+ * Financial state for this turn. In trading mode, paper equity decides the
+ * survival tier (re-marked at live prices, margin call enforced first).
+ */
+async function getAgentFinancialState(
+  conway: ConwayClient,
+  address: string,
+  db: AutomatonDatabase,
+  chainType: string,
+  tradingCfg: TradingConfig | undefined,
+): Promise<FinancialState> {
+  const base = await getFinancialState(conway, address, db, chainType);
+  if (!tradingCfg) return base;
+  const { snapshot, liquidations, quoteErrors } = await refreshPaperAccount(db.raw, tradingCfg);
+  if (liquidations.length > 0) {
+    logger.warn(`[TRADING] Margin call: ${liquidations.length} position(s) force-closed.`);
+  }
+  if (quoteErrors.length > 0) {
+    logger.warn(`[TRADING] Price refresh failed: ${quoteErrors.join("; ")}`);
+  }
+  return {
+    ...base,
+    tierOverride: getTradingSurvivalTier(snapshot.equity, snapshot.startingCapital, tradingCfg),
+    paper: {
+      equity: snapshot.equity,
+      startingCapital: snapshot.startingCapital,
+      currency: tradingCfg.currency,
+      leverage: snapshot.leverage,
+    },
   };
 }
 

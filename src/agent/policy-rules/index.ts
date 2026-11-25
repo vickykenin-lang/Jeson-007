@@ -13,6 +13,8 @@ import { createPathProtectionRules } from "./path-protection.js";
 import { createFinancialRules } from "./financial.js";
 import { createAuthorityRules } from "./authority.js";
 import { createRateLimitRules } from "./rate-limits.js";
+import { createTradingRules } from "./trading.js";
+import type { TradingConfig } from "../../trading/types.js";
 
 /**
  * Create the default set of policy rules.
@@ -20,8 +22,10 @@ import { createRateLimitRules } from "./rate-limits.js";
  */
 export function createDefaultRules(
   treasuryPolicy: TreasuryPolicy = DEFAULT_TREASURY_POLICY,
+  tradingConfig?: TradingConfig,
 ): PolicyRule[] {
   return [
+    ...(tradingConfig?.enabled ? createTradingRules(tradingConfig) : []),
     ...createValidationRules(),
     ...createCommandSafetyRules(),
     ...createPathProtectionRules(),

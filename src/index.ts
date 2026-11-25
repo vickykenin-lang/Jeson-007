@@ -309,7 +309,7 @@ async function run(): Promise<void> {
 
   // Initialize PolicyEngine + SpendTracker (Phase 1.4)
   const treasuryPolicy = config.treasuryPolicy ?? DEFAULT_TREASURY_POLICY;
-  const rules = createDefaultRules(treasuryPolicy);
+  const rules = createDefaultRules(treasuryPolicy, config.trading);
   const policyEngine = new PolicyEngine(db.raw, rules);
   const spendTracker = new SpendTracker(db.raw);
 

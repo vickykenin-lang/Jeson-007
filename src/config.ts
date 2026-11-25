@@ -4,6 +4,7 @@
  * Loads and saves the automaton's configuration from ~/.automaton/automaton.json
  */
 
+import { resolveTradingConfig } from "./trading/types.js";
 import fs from "fs";
 import path from "path";
 import type { AutomatonConfig, TreasuryPolicy, ModelStrategyConfig, SoulConfig } from "./types.js";
@@ -73,6 +74,7 @@ export function loadConfig(): AutomatonConfig | null {
       modelStrategy,
       soulConfig,
       chainType: raw.chainType || "evm",
+      trading: raw.trading ? resolveTradingConfig(raw.trading) : undefined,
     } as AutomatonConfig;
   } catch {
     return null;
