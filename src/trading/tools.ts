@@ -37,6 +37,7 @@ function money(n: number, cfg: TradingConfig): string {
 
 export function formatSnapshot(s: AccountSnapshot, cfg: TradingConfig): string {
   const lines = [
+    ...(s.tampered ? ["LEDGER TAMPERED: the paper ledger was changed outside the runtime. The account is dead."] : []),
     `Equity: ${money(s.equity, cfg)} (start ${money(s.startingCapital, cfg)}, ${((s.equity / s.startingCapital - 1) * 100).toFixed(2)}% total)`,
     `Cash: ${money(s.cash, cfg)}${s.cash < 0 ? " (negative = margin borrowed)" : ""}`,
     `Gross exposure: ${money(s.grossExposure, cfg)} | Leverage: ${Number.isFinite(s.leverage) ? s.leverage.toFixed(2) : "∞"}x (max ${cfg.maxLeverage}x)`,

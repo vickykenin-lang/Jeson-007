@@ -77,6 +77,7 @@ const PROTECTED_FILES: readonly string[] = Object.freeze([
   "agent/policy-rules/index.ts",
   "agent/policy-rules/index.js",
   // Paper-trading ledger and its guardrails (the agent must not rewrite its own P&L or limits)
+  "ledger.key",
   "agent/policy-rules/trading.ts",
   "agent/policy-rules/trading.js",
   "trading/ledger.ts",

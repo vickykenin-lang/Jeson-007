@@ -49,6 +49,13 @@ export interface TradingConfig {
   /** Adverse slippage applied to every fill, in basis points. */
   slippageBps: number;
 
+  // ── Research sandboxes (real Conway credits) ──
+  /** Max create_sandbox calls in any rolling 24 hours. */
+  sandboxMaxPerDay: number;
+  sandboxMaxVcpu: number;
+  sandboxMaxMemoryMb: number;
+  sandboxMaxDiskGb: number;
+
   // ── Survival tiers (equity as % of starting capital) ──
   tierThresholdsPct: {
     /** At or above this → normal (at or above 100% → high). */
@@ -80,6 +87,11 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   feeBps: 5,
   slippageBps: 5,
 
+  sandboxMaxPerDay: 2,
+  sandboxMaxVcpu: 2,
+  sandboxMaxMemoryMb: 2048,
+  sandboxMaxDiskGb: 20,
+
   tierThresholdsPct: {
     normal: 60,
     lowCompute: 30,
@@ -107,6 +119,7 @@ export function resolveTradingConfig(
     "startingCapital", "maxLeverage", "maintenanceMarginPct",
     "maxSinglePositionPct", "maxOpenPositions", "dailyLossLimitPct",
     "maxOrdersPerHour", "quoteMaxAgeSeconds", "feeBps", "slippageBps",
+    "sandboxMaxPerDay", "sandboxMaxVcpu", "sandboxMaxMemoryMb", "sandboxMaxDiskGb",
   ];
   for (const key of numericKeys) {
     const v = merged[key] as unknown;
@@ -157,6 +170,8 @@ export interface AccountSnapshot {
   dayStartEquity: number;
   dayPnl: number;
   realizedPnl: number;
+  /** Ledger seal broken: edited outside the runtime. The account is dead. */
+  tampered: boolean;
 }
 
 export interface Fill {

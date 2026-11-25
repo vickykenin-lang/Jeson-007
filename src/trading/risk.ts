@@ -45,6 +45,9 @@ export function checkOrderRisk(
   price: number,
   cfg: TradingConfig,
 ): RiskViolation | null {
+  if (snapshot.tampered) {
+    return { code: "LEDGER_TAMPERED", message: "The paper ledger was modified outside the runtime. Trading is disabled." };
+  }
   if (isReduceOnly(snapshot, order)) return null;
 
   const { equity } = snapshot;
@@ -122,8 +125,9 @@ export function getTradingSurvivalTier(
   equity: number,
   startingCapital: number,
   cfg: TradingConfig,
+  tampered = false,
 ): SurvivalTier {
-  if (!(startingCapital > 0)) return "dead";
+  if (tampered || !(startingCapital > 0)) return "dead";
   const pct = (equity / startingCapital) * 100;
   const t = cfg.tierThresholdsPct;
   if (pct >= 100) return "high";

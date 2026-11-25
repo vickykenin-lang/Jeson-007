@@ -235,6 +235,7 @@ export interface FinancialState {
     startingCapital: number;
     currency: string;
     leverage: number;
+    tampered: boolean;
   };
 }
 

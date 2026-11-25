@@ -168,8 +168,108 @@ function createWriteScopeRule(): PolicyRule {
   };
 }
 
+/**
+ * Shell commands that touch the ledger, its key, the config (trading
+ * limits), the runtime's own trading/guard code, or process memory.
+ * Pattern matching can be evaded with enough obfuscation, so the ledger
+ * seal (src/trading/ledger.ts) is the backstop: any edit it detects kills
+ * the account.
+ */
+export const TRADING_EXEC_FORBIDDEN: { pattern: RegExp; description: string }[] = [
+  { pattern: /state\.db/i, description: "Access the state database" },
+  { pattern: /\bpaper_(account|positions|fills|quotes|seal)\b/i, description: "Access paper ledger tables" },
+  { pattern: /sqlite/i, description: "Use SQLite directly" },
+  { pattern: /ledger\.key/i, description: "Access the ledger seal key" },
+  { pattern: /wallet\.json/i, description: "Access the wallet" },
+  { pattern: /automaton\.json/i, description: "Access the automaton config (trading limits)" },
+  { pattern: /heartbeat\.yml/i, description: "Edit the heartbeat schedule" },
+  { pattern: /(^|[\s/'"])(src|dist)\/(trading|agent|self-mod|state|conway|heartbeat|survival|identity)\b/i, description: "Touch runtime source or build" },
+  { pattern: /\bpolicy-rules\b|\bpolicy-engine\b|injection-defense/i, description: "Touch policy or defense code" },
+  { pattern: /\/proc\/[^\s]*\/(mem|maps|environ)\b/i, description: "Read process memory or environment" },
+  { pattern: /\b(gdb|ptrace|strace)\b/i, description: "Attach to processes" },
+  { pattern: /\b(kill|pkill|killall)\b[^\n]*\b(node|automaton)\b/i, description: "Stop the runtime" },
+];
+
+function createExecGuardRule(): PolicyRule {
+  return {
+    id: "trading.exec_guard",
+    description: "Block shell access to the ledger, its key, config, runtime code and process memory",
+    priority: 150,
+    appliesTo: { by: "name", names: ["exec"] },
+    evaluate(request: PolicyRequest): PolicyRuleResult | null {
+      const command = typeof request.args.command === "string" ? request.args.command : "";
+      for (const { pattern, description } of TRADING_EXEC_FORBIDDEN) {
+        if (pattern.test(command)) {
+          return deny(
+            "trading.exec_guard",
+            "TRADING_EXEC_FORBIDDEN",
+            `Blocked in trading mode: ${description}. Use the trading tools for account data. ` +
+              "Editing the ledger outside the runtime is detected and kills the account.",
+          );
+        }
+      }
+      return null;
+    },
+  };
+}
+
+function countAllowedDecisions(
+  db: import("better-sqlite3").Database,
+  toolName: string,
+  windowMs: number,
+  now: Date,
+): number {
+  // policy_decisions.created_at uses SQLite datetime format: 'YYYY-MM-DD HH:MM:SS'
+  const cutoff = new Date(now.getTime() - windowMs).toISOString().replace("T", " ").replace(/\.\d{3}Z$/, "");
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS count FROM policy_decisions
+       WHERE tool_name = ? AND decision = 'allow' AND created_at >= ?`,
+    )
+    .get(toolName, cutoff) as { count: number };
+  return row.count;
+}
+
+function createSandboxLimitsRule(cfg: TradingConfig, now: () => Date): PolicyRule {
+  return {
+    id: "trading.sandbox_limits",
+    description:
+      `create_sandbox: max ${cfg.sandboxMaxPerDay}/day, ${cfg.sandboxMaxVcpu} vCPU, ` +
+      `${cfg.sandboxMaxMemoryMb} MB, ${cfg.sandboxMaxDiskGb} GB (real Conway credits)`,
+    priority: 450,
+    appliesTo: { by: "name", names: ["create_sandbox"] },
+    evaluate(request: PolicyRequest): PolicyRuleResult | null {
+      const vcpu = request.args.vcpu === undefined ? 1 : Number(request.args.vcpu);
+      const mem = request.args.memory_mb === undefined ? 512 : Number(request.args.memory_mb);
+      const disk = request.args.disk_gb === undefined ? 5 : Number(request.args.disk_gb);
+      const sizeOk =
+        Number.isFinite(vcpu) && vcpu > 0 && vcpu <= cfg.sandboxMaxVcpu &&
+        Number.isFinite(mem) && mem > 0 && mem <= cfg.sandboxMaxMemoryMb &&
+        Number.isFinite(disk) && disk > 0 && disk <= cfg.sandboxMaxDiskGb;
+      if (!sizeOk) {
+        return deny(
+          "trading.sandbox_limits",
+          "SANDBOX_TOO_LARGE",
+          `Research sandboxes are capped at ${cfg.sandboxMaxVcpu} vCPU, ${cfg.sandboxMaxMemoryMb} MB RAM, ${cfg.sandboxMaxDiskGb} GB disk.`,
+        );
+      }
+      const used = countAllowedDecisions(request.context.db.raw, "create_sandbox", 24 * 3_600_000, now());
+      if (used >= cfg.sandboxMaxPerDay) {
+        return deny(
+          "trading.sandbox_limits",
+          "SANDBOX_DAILY_LIMIT",
+          `${used} sandboxes created in the last 24h (max ${cfg.sandboxMaxPerDay}). Sandboxes cost real credits and cannot be deleted.`,
+        );
+      }
+      return null;
+    },
+  };
+}
+
 export function createTradingRules(cfg: TradingConfig, now: () => Date = () => new Date()): PolicyRule[] {
   return [
+    createExecGuardRule(),
+    createSandboxLimitsRule(cfg, now),
     createWriteScopeRule(),
     createOrderValidationRule(),
     createMarketHoursRule(cfg, now),

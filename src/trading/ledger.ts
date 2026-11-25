@@ -13,8 +13,12 @@
  * sale proceeds to cash and holds a negative quantity.
  */
 
+import crypto from "crypto";
+import fs from "fs";
+import path from "path";
 import type BetterSqlite3 from "better-sqlite3";
 import { ulid } from "ulid";
+import { getAutomatonDir } from "../identity/wallet.js";
 import { marketDate } from "./market-data.js";
 import type {
   AccountSnapshot,
@@ -28,6 +32,108 @@ import type {
 type DB = BetterSqlite3.Database;
 
 const EPS = 1e-9;
+
+// ─── Tamper seal ─────────────────────────────────────────────────
+//
+// The agent has a shell in trading mode, so it could try to edit the
+// paper tables directly (e.g. raise its cash). Every legitimate ledger
+// write re-signs the full ledger state with an HMAC; every read verifies
+// it first. A mismatch sets a sticky `tampered` flag (itself covered by
+// the seal), which makes the account dead. The HMAC key lives in
+// ~/.automaton/ledger.key (0600), which read_file and exec may not touch.
+
+let injectedSealKey: Buffer | null = null;
+let injectedKeyPreexisted = false;
+let cachedSealKey: Buffer | null = null;
+let keyFilePreexisted = false;
+/** DB files whose ledger this process has already seen (a later "fresh" ledger there is a deletion). */
+const initializedLedgers = new Set<string>();
+
+/**
+ * Override the seal key (tests). `preexisting` simulates a key left by an
+ * earlier run. Pass null to go back to the key file.
+ */
+export function setLedgerSealKey(key: Buffer | null, preexisting = false): void {
+  injectedSealKey = key;
+  injectedKeyPreexisted = preexisting;
+  cachedSealKey = null;
+}
+
+export function getLedgerKeyPath(): string {
+  return path.join(getAutomatonDir(), "ledger.key");
+}
+
+/** True when the seal key already existed before this process first needed it. */
+function sealKeyPreexisted(): boolean {
+  if (injectedSealKey) return injectedKeyPreexisted;
+  getSealKey();
+  return keyFilePreexisted;
+}
+
+function getSealKey(): Buffer {
+  if (injectedSealKey) return injectedSealKey;
+  if (cachedSealKey) return cachedSealKey;
+  const keyPath = getLedgerKeyPath();
+  if (fs.existsSync(keyPath)) {
+    keyFilePreexisted = true;
+    cachedSealKey = Buffer.from(fs.readFileSync(keyPath, "utf-8").trim(), "hex");
+  } else {
+    keyFilePreexisted = false;
+    fs.mkdirSync(path.dirname(keyPath), { recursive: true, mode: 0o700 });
+    const key = crypto.randomBytes(32);
+    fs.writeFileSync(keyPath, key.toString("hex"), { mode: 0o600 });
+    cachedSealKey = key;
+  }
+  if (cachedSealKey.length < 32) throw new Error("ledger.key is invalid");
+  return cachedSealKey;
+}
+
+function ledgerDigest(db: DB): string {
+  const acct = db.prepare("SELECT * FROM paper_account WHERE id = 1").get();
+  const positions = db.prepare("SELECT * FROM paper_positions ORDER BY symbol").all();
+  const fills = db.prepare("SELECT * FROM paper_fills ORDER BY id").all();
+  const quotes = db.prepare("SELECT * FROM paper_quotes ORDER BY symbol").all();
+  const flag = db.prepare("SELECT tampered, tampered_at FROM paper_seal WHERE id = 1").get() ?? null;
+  const canonical = JSON.stringify({ acct, positions, fills, quotes, flag });
+  return crypto.createHmac("sha256", getSealKey()).update(canonical).digest("hex");
+}
+
+function reseal(db: DB): void {
+  const digest = ledgerDigest(db);
+  db.prepare("UPDATE paper_seal SET seal = ? WHERE id = 1").run(digest);
+}
+
+/**
+ * Verify the ledger seal. On mismatch, permanently flag the account as
+ * tampered (and re-sign so the flag itself is protected).
+ * Returns true when the account is (or already was) tampered.
+ */
+function verifySeal(db: DB): boolean {
+  const row = db.prepare("SELECT seal, tampered FROM paper_seal WHERE id = 1").get() as
+    | { seal: string; tampered: number }
+    | undefined;
+  if (!row) return true;
+  const expected = ledgerDigest(db);
+  const ok =
+    row.seal.length === expected.length &&
+    crypto.timingSafeEqual(Buffer.from(row.seal), Buffer.from(expected));
+  if (!ok) {
+    db.prepare("UPDATE paper_seal SET tampered = 1, tampered_at = ? WHERE id = 1").run(new Date().toISOString());
+    reseal(db);
+    return true;
+  }
+  return row.tampered === 1;
+}
+
+/** Read-only check used by status code. */
+export function isLedgerTampered(db: DB): boolean {
+  return db.transaction(() => verifySeal(db))();
+}
+
+/** Re-sign the current ledger state as trusted (tests and creator tooling only). */
+export function trustCurrentLedgerState(db: DB): void {
+  db.transaction(() => reseal(db))();
+}
 
 export function ensurePaperSchema(db: DB, cfg: TradingConfig): void {
   db.exec(`
@@ -65,13 +171,41 @@ export function ensurePaperSchema(db: DB, cfg: TradingConfig): void {
       as_of TEXT NOT NULL,
       fetched_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS paper_seal (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      seal TEXT NOT NULL,
+      tampered INTEGER NOT NULL DEFAULT 0,
+      tampered_at TEXT
+    );
   `);
-  const row = db.prepare("SELECT id FROM paper_account WHERE id = 1").get();
-  if (!row) {
-    db.prepare(
-      "INSERT INTO paper_account (id, cash, starting_capital, realized_pnl, created_at) VALUES (1, ?, ?, 0, ?)",
-    ).run(cfg.startingCapital, cfg.startingCapital, new Date().toISOString());
-  }
+  db.transaction(() => {
+    const acct = db.prepare("SELECT id FROM paper_account WHERE id = 1").get();
+    const seal = db.prepare("SELECT id FROM paper_seal WHERE id = 1").get();
+    if (acct && seal) {
+      initializedLedgers.add(db.name);
+      return;
+    }
+
+    // A genuinely new ledger has neither row AND no key from an earlier run.
+    // Anything else (rows deleted, seal dropped, key kept) means someone
+    // removed ledger state outside the runtime: create the rows so the code
+    // keeps working, but mark the account tampered. A creator reset deletes
+    // the paper_* tables AND ~/.automaton/ledger.key.
+    const genuineNew = !acct && !seal && !sealKeyPreexisted() && !initializedLedgers.has(db.name);
+    initializedLedgers.add(db.name);
+    if (!acct) {
+      db.prepare(
+        "INSERT INTO paper_account (id, cash, starting_capital, realized_pnl, created_at) VALUES (1, ?, ?, 0, ?)",
+      ).run(cfg.startingCapital, cfg.startingCapital, new Date().toISOString());
+    }
+    if (!seal) {
+      db.prepare("INSERT INTO paper_seal (id, seal, tampered) VALUES (1, '', 0)").run();
+    }
+    if (!genuineNew) {
+      db.prepare("UPDATE paper_seal SET tampered = 1, tampered_at = ? WHERE id = 1").run(new Date().toISOString());
+    }
+    reseal(db);
+  })();
 }
 
 function readPositions(db: DB): Position[] {
@@ -116,6 +250,11 @@ function computeTotals(cash: number, positions: Position[]) {
  * baseline when the exchange date changes.
  */
 export function getSnapshot(db: DB, cfg: TradingConfig, now: Date = new Date()): AccountSnapshot {
+  return db.transaction(() => snapshotInTx(db, cfg, now))();
+}
+
+function snapshotInTx(db: DB, cfg: TradingConfig, now: Date): AccountSnapshot {
+  const tampered = verifySeal(db);
   const acct = readAccount(db);
   const positions = readPositions(db);
   const totals = computeTotals(acct.cash, positions);
@@ -125,6 +264,7 @@ export function getSnapshot(db: DB, cfg: TradingConfig, now: Date = new Date()):
   if (acct.day_date !== today || dayStart == null) {
     dayStart = totals.equity;
     db.prepare("UPDATE paper_account SET day_date = ?, day_start_equity = ? WHERE id = 1").run(today, dayStart);
+    reseal(db);
   }
 
   return {
@@ -138,11 +278,20 @@ export function getSnapshot(db: DB, cfg: TradingConfig, now: Date = new Date()):
     dayStartEquity: dayStart,
     dayPnl: totals.equity - dayStart,
     realizedPnl: acct.realized_pnl,
+    tampered,
   };
 }
 
 /** Cache a quote (used by pre-trade policy checks) and re-mark any open position. */
 export function recordQuote(db: DB, quote: Quote): void {
+  db.transaction(() => {
+    verifySeal(db);
+    recordQuoteInTx(db, quote);
+    reseal(db);
+  })();
+}
+
+function recordQuoteInTx(db: DB, quote: Quote): void {
   const now = new Date().toISOString();
   db.prepare(
     `INSERT INTO paper_quotes (symbol, price, as_of, fetched_at) VALUES (?, ?, ?, ?)
@@ -226,6 +375,7 @@ export function applyFill(
   const signed = side === "buy" ? quantity : -quantity;
 
   const tx = db.transaction((): Fill => {
+    if (verifySeal(db)) throw new Error("LEDGER_TAMPERED: the paper ledger was modified outside the runtime; trading is disabled.");
     const acct = readAccount(db);
     const pos = getPosition(db, symbol);
     const p = pos?.quantity ?? 0;
@@ -279,6 +429,7 @@ export function applyFill(
     db.prepare(
       "INSERT INTO paper_fills (id, time, symbol, side, quantity, price, fee, realized_pnl, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     ).run(fill.id, fill.time, fill.symbol, fill.side, fill.quantity, fill.price, fill.fee, fill.realizedPnl, fill.reason);
+    reseal(db);
     return fill;
   });
 
@@ -297,7 +448,7 @@ export function isMarginCall(snapshot: AccountSnapshot, cfg: TradingConfig): boo
  */
 export function enforceMarginCall(db: DB, cfg: TradingConfig): Fill[] {
   const snap = getSnapshot(db, cfg);
-  if (!isMarginCall(snap, cfg)) return [];
+  if (snap.tampered || !isMarginCall(snap, cfg)) return [];
   const fills: Fill[] = [];
   for (const p of snap.positions) {
     fills.push(

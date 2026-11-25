@@ -485,7 +485,12 @@ export async function runAgentLoop(
         const effectiveTier = financial.tierOverride ?? getSurvivalTier(financial.creditsCents);
 
         if (tradingCfg && effectiveTier === "dead") {
-          log(config, `[DEAD] Paper equity ${financial.paper?.equity.toFixed(2)} ${financial.paper?.currency} is at or below ${tradingCfg.tierThresholdsPct.critical}% of starting capital. The automaton stops.`);
+          log(
+            config,
+            financial.paper?.tampered
+              ? "[DEAD] Paper ledger was modified outside the runtime (seal broken). The automaton stops."
+              : `[DEAD] Paper equity ${financial.paper?.equity.toFixed(2)} ${financial.paper?.currency} is at or below ${tradingCfg.tierThresholdsPct.critical}% of starting capital. The automaton stops.`,
+          );
           db.setAgentState("dead");
           onStateChange?.("dead");
           if (claimedMessages.length > 0) {
@@ -1050,17 +1055,21 @@ async function getAgentFinancialState(
   if (liquidations.length > 0) {
     logger.warn(`[TRADING] Margin call: ${liquidations.length} position(s) force-closed.`);
   }
+  if (snapshot.tampered) {
+    logger.error("[TRADING] Paper ledger seal is broken (modified outside the runtime). Account is dead.");
+  }
   if (quoteErrors.length > 0) {
     logger.warn(`[TRADING] Price refresh failed: ${quoteErrors.join("; ")}`);
   }
   return {
     ...base,
-    tierOverride: getTradingSurvivalTier(snapshot.equity, snapshot.startingCapital, tradingCfg),
+    tierOverride: getTradingSurvivalTier(snapshot.equity, snapshot.startingCapital, tradingCfg, snapshot.tampered),
     paper: {
       equity: snapshot.equity,
       startingCapital: snapshot.startingCapital,
       currency: tradingCfg.currency,
       leverage: snapshot.leverage,
+      tampered: snapshot.tampered,
     },
   };
 }

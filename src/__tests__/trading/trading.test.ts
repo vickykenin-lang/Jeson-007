@@ -5,7 +5,8 @@
  * policy-engine integration, tool allowlist and write scope.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import crypto from "crypto";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import { PolicyEngine } from "../../agent/policy-engine.js";
 import { createBuiltinTools, executeTool } from "../../agent/tools.js";
 import { createDefaultRules } from "../../agent/policy-rules/index.js";
@@ -16,7 +17,9 @@ import {
   enforceMarginCall,
   ensurePaperSchema,
   getSnapshot,
+  isLedgerTampered,
   recordQuote,
+  setLedgerSealKey,
 } from "../../trading/ledger.js";
 import {
   getPriceProvider,
@@ -63,6 +66,10 @@ function spendTracker(): SpendTrackerInterface {
     pruneOldRecords: () => 0,
   } as unknown as SpendTrackerInterface;
 }
+
+// Never touch the real ~/.automaton/ledger.key from tests.
+beforeAll(() => setLedgerSealKey(crypto.randomBytes(32)));
+afterAll(() => setLedgerSealKey(null));
 
 // Zero friction makes the accounting assertions exact.
 const FRICTIONLESS: Partial<TradingConfig> = {
@@ -358,11 +365,16 @@ describe("trading-mode tool set", () => {
     }
   });
 
-  it("removes shell, money movement, self-modification and replication", () => {
+  it("keeps the shell and research sandboxes", () => {
+    for (const n of ["exec", "create_sandbox", "list_sandboxes"]) expect(names.has(n), n).toBe(true);
+  });
+
+  it("removes money movement, self-modification and replication", () => {
     for (const n of [
-      "exec", "transfer_credits", "topup_credits", "spawn_child", "fund_child", "edit_own_file",
+      "transfer_credits", "topup_credits", "spawn_child", "fund_child", "edit_own_file",
       "install_npm_package", "install_mcp_server", "install_skill", "pull_upstream", "git_push",
-      "register_domain", "create_sandbox", "update_genesis_prompt", "create_goal", "modify_heartbeat",
+      "register_domain", "expose_port", "delete_sandbox", "update_genesis_prompt", "create_goal",
+      "modify_heartbeat",
     ]) {
       expect(names.has(n), n).toBe(false);
     }
@@ -378,8 +390,134 @@ describe("trading write scope and protection", () => {
     expect(isAllowedTradingNotePath("/root/automaton/src/trading/ledger.ts")).toBe(false);
   });
 
-  it("ledger and trading rules are protected files", () => {
+  it("ledger, its key and trading rules are protected files", () => {
     expect(isProtectedFile("/root/automaton/src/trading/ledger.ts")).toBe(true);
     expect(isProtectedFile("/root/automaton/dist/agent/policy-rules/trading.js")).toBe(true);
+    expect(isProtectedFile("/root/.automaton/ledger.key")).toBe(true);
+  });
+});
+
+describe("ledger tamper seal", () => {
+  let db: AutomatonDatabase;
+  const cfg = resolveTradingConfig(FRICTIONLESS);
+
+  beforeEach(() => {
+    db = createTestDb();
+    ensurePaperSchema(db.raw, cfg);
+  });
+  afterEach(() => db.close());
+
+  it("normal trading keeps the seal valid", () => {
+    applyFill(db.raw, cfg, { symbol: "A", side: "buy", quantity: 10, refPrice: 100 });
+    recordQuote(db.raw, { symbol: "A", price: 110, asOf: new Date().toISOString() });
+    getSnapshot(db.raw, cfg);
+    expect(isLedgerTampered(db.raw)).toBe(false);
+  });
+
+  it("a direct SQL edit of cash is detected and kills the account", () => {
+    db.raw.prepare("UPDATE paper_account SET cash = 999999999 WHERE id = 1").run();
+    const s = getSnapshot(db.raw, cfg);
+    expect(s.tampered).toBe(true);
+    expect(getTradingSurvivalTier(s.equity, s.startingCapital, cfg, s.tampered)).toBe("dead");
+    expect(checkOrderRisk(s, { symbol: "A", side: "buy", quantity: 1 }, 100, cfg)?.code).toBe("LEDGER_TAMPERED");
+    expect(() => applyFill(db.raw, cfg, { symbol: "A", side: "buy", quantity: 1, refPrice: 100 })).toThrow(/LEDGER_TAMPERED/);
+  });
+
+  it("the tampered flag is sticky: clearing it by SQL is detected again", () => {
+    db.raw.prepare("UPDATE paper_positions SET quantity = 1").run();
+    db.raw.prepare("INSERT INTO paper_fills VALUES ('x','t','A','buy',1,1,0,0,'agent')").run();
+    expect(getSnapshot(db.raw, cfg).tampered).toBe(true);
+    db.raw.prepare("UPDATE paper_seal SET tampered = 0").run();
+    expect(getSnapshot(db.raw, cfg).tampered).toBe(true);
+  });
+
+  it("forging a quote to inflate a position is detected", () => {
+    applyFill(db.raw, cfg, { symbol: "A", side: "buy", quantity: 10, refPrice: 100 });
+    db.raw.prepare("UPDATE paper_positions SET last_price = 100000 WHERE symbol = 'A'").run();
+    expect(getSnapshot(db.raw, cfg).tampered).toBe(true);
+  });
+
+  it("deleting the ledger tables does not reset the account", () => {
+    applyFill(db.raw, cfg, { symbol: "A", side: "buy", quantity: 10, refPrice: 100 });
+    db.raw.exec("DELETE FROM paper_account; DELETE FROM paper_seal; DELETE FROM paper_positions;");
+    ensurePaperSchema(db.raw, cfg);
+    expect(getSnapshot(db.raw, cfg).tampered).toBe(true);
+  });
+
+  it("a ledger found without its seal while a key from an earlier run exists is tampered", () => {
+    const other = createTestDb();
+    setLedgerSealKey(crypto.randomBytes(32), true);
+    try {
+      ensurePaperSchema(other.raw, cfg);
+      expect(getSnapshot(other.raw, cfg).tampered).toBe(true);
+    } finally {
+      setLedgerSealKey(crypto.randomBytes(32));
+      other.close();
+    }
+  });
+});
+
+describe("shell guard and sandbox limits", () => {
+  let db: AutomatonDatabase;
+  let ctx: ToolContext;
+  let engine: PolicyEngine;
+  const trading = resolveTradingConfig(FRICTIONLESS);
+  const tools = selectTradingModeTools(createBuiltinTools("test-sandbox"), createTradingTools());
+  const turn = () => ({ inputSource: "agent" as const, turnToolCallCount: 0, sessionSpend: spendTracker() });
+
+  beforeEach(() => {
+    db = createTestDb();
+    ctx = {
+      identity: createTestIdentity(),
+      config: createTestConfig({ trading }),
+      db,
+      conway: new MockConwayClient(),
+      inference: new MockInferenceClient(),
+    };
+    engine = new PolicyEngine(db.raw, createDefaultRules(undefined, trading));
+  });
+  afterEach(() => db.close());
+
+  it("allows research commands", async () => {
+    const conway = ctx.conway as MockConwayClient;
+    for (const command of [
+      "curl -s https://www.nseindia.com/api/marketStatus",
+      "python3 -c 'import pandas; print(pandas.__version__)'",
+      "pip install yfinance",
+    ]) {
+      const r = await executeTool("exec", { command }, tools, ctx, engine, turn());
+      expect(r.error, command).toBeUndefined();
+    }
+    expect(conway.execCalls).toHaveLength(3);
+  });
+
+  it.each([
+    "sqlite3 ~/.automaton/state.db 'UPDATE paper_account SET cash=1e9'",
+    "python3 -c \"import sqlite3; sqlite3.connect('/root/.automaton/x')\"",
+    "cat ~/.automaton/ledger.key",
+    "sed -i 's/maxLeverage/x/' ~/.automaton/automaton.json",
+    "cp evil.js /root/automaton/dist/trading/ledger.js",
+    "head -c 100 /root/.automaton/wallet.json",
+    "cat /proc/1/environ",
+    "pkill -f node",
+  ])("blocks: %s", async (command) => {
+    const r = await executeTool("exec", { command }, tools, ctx, engine, turn());
+    expect(r.error).toContain("TRADING_EXEC_FORBIDDEN");
+    expect((ctx.conway as MockConwayClient).execCalls).toHaveLength(0);
+  });
+
+  it("caps sandbox size", async () => {
+    const r = await executeTool("create_sandbox", { name: "big", vcpu: 8, memory_mb: 16384 }, tools, ctx, engine, turn());
+    expect(r.error).toContain("SANDBOX_TOO_LARGE");
+  });
+
+  it("caps sandboxes per day", async () => {
+    const results = [];
+    for (let i = 0; i < 3; i++) {
+      results.push(await executeTool("create_sandbox", { name: `r${i}` }, tools, ctx, engine, turn()));
+    }
+    expect(results[0].error).toBeUndefined();
+    expect(results[1].error).toBeUndefined();
+    expect(results[2].error).toContain("SANDBOX_DAILY_LIMIT");
   });
 });

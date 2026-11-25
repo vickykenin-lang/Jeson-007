@@ -1,16 +1,22 @@
 /**
  * Trading-mode tool allowlist.
  *
- * In trading mode the agent keeps only what it needs to trade, remember,
- * reflect and report. Everything that spends real money (credit transfers,
- * top-ups, sandboxes, domains, children), changes its own code or rules,
- * or opens a side channel around the paper ledger (shell, git, package /
- * skill / MCP installs, upstream pulls) is removed.
+ * In trading mode the agent keeps what it needs to trade, research,
+ * remember, reflect and report. It has a shell and research sandboxes for
+ * internet R&D and analysis; the ledger, config and trading code are
+ * guarded (trading.exec_guard + tamper seal) and sandbox spend is capped
+ * (trading.sandbox_limits). Removed: credit transfers and top-ups, domains,
+ * ports, child agents, self-editing code, upstream pulls, genesis and
+ * heartbeat edits, and the orchestrator.
  */
 
 import type { AutomatonTool } from "../types.js";
 
 export const TRADING_MODE_BUILTIN_TOOLS: ReadonlySet<string> = new Set([
+  // Research & analysis: shell (curl, python, pip ...) in the sandbox, extra sandboxes
+  "exec",
+  "create_sandbox",
+  "list_sandboxes",
   // Notes / journal (writes further restricted by trading.write_scope rule)
   "read_file",
   "write_file",

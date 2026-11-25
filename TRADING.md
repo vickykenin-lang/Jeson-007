@@ -33,6 +33,11 @@ out uses the default shown below.
     "feeBps": 5,
     "slippageBps": 5,
 
+    "sandboxMaxPerDay": 2,
+    "sandboxMaxVcpu": 2,
+    "sandboxMaxMemoryMb": 2048,
+    "sandboxMaxDiskGb": 20,
+
     "tierThresholdsPct": { "normal": 60, "lowCompute": 30, "critical": 10 }
   }
 }
@@ -82,6 +87,8 @@ These rules live in `src/agent/policy-rules/trading.ts`, with the checks in
 - `get_portfolio`, `get_trade_history`
 
 **Kept built-in tools:**
+- research: `exec` (shell in the sandbox: curl, python, pip ...),
+  `create_sandbox`, `list_sandboxes`
 - notes: `read_file`, `write_file` (only `.md`/`.txt` files under `~/.automaton`)
 - status: `check_credits`, `system_synopsis`, `heartbeat_ping`, `sleep`
 - memory: `remember_fact`, `recall_facts`, `set_goal`, `complete_goal`,
@@ -90,14 +97,42 @@ These rules live in `src/agent/policy-rules/trading.ts`, with the checks in
 - models: `list_models`, `switch_model`, `check_inference_spending`
 - messaging: `send_message`
 
-**Removed:** shell (`exec`), credit transfers and top-ups, sandboxes, ports,
-domains, git, package/skill/MCP installs, self-editing code, upstream pulls,
-genesis edits, heartbeat edits, child agents, the agent registry and the
-orchestrator. All of these either spend real money or would let the agent
-work around the paper ledger. Previously installed tools are not loaded.
+**Removed:** credit transfers and top-ups, `delete_sandbox`, ports, domains,
+git tools, the package/skill/MCP install tools, self-editing code, upstream
+pulls, genesis edits, heartbeat edits, child agents, the agent registry and
+the orchestrator. These either move real money or change the agent itself.
+Previously installed tools are not loaded. (The agent can still `pip install`
+or `npm install` inside its sandbox through `exec` for research.)
 
-The ledger, the risk code and the trading rules are on the protected-files
-list, so the agent cannot rewrite its own P&L or limits.
+## Research and keeping the ledger honest
+
+With a shell, the agent can do internet R&D (news, filings, results, macro
+data), run Python/pandas analysis and backtests, and start extra sandboxes
+for heavy jobs. Two guards stop it from cheating the paper account:
+
+1. **Shell guard** (`trading.exec_guard`). The shell may not mention:
+   - `state.db`, the `paper_*` tables, or SQLite
+   - `ledger.key`, `wallet.json`, `automaton.json` (the trading limits), `heartbeat.yml`
+   - the runtime's `src/` or `dist/` code, or the policy and defense code
+   - `/proc/*/mem` / `environ`, debuggers, or killing the runtime
+
+   Pattern matching can be evaded with enough obfuscation, so it is the
+   first line, not the last.
+2. **Tamper seal.** Every legitimate ledger write re-signs the whole ledger
+   (account, positions, fills, quotes) with an HMAC. The key is in
+   `~/.automaton/ledger.key` (0600, protected, unreadable via `read_file`).
+   Every read verifies the seal first. Any of these marks the account
+   **tampered**, which is permanent and means **dead**:
+   - an edit made outside the runtime
+   - deleting rows or tables
+   - clearing the tampered flag
+
+**Sandbox spend** (`trading.sandbox_limits`): sandboxes cost real Conway
+credits and cannot be deleted. The defaults allow at most 2 per rolling
+24 hours, each at most 2 vCPU / 2048 MB / 20 GB.
+
+The ledger, its key, the risk code and the trading rules are also on the
+protected-files list.
 
 ## Market data
 
@@ -124,5 +159,7 @@ credits from USDC is turned off inside the agent loop in trading mode.
 
 ## Resetting the paper account
 
-Stop the automaton, then remove the `paper_account`, `paper_positions`,
-`paper_fills` and `paper_quotes` tables from `~/.automaton/state.db`.
+Stop the automaton. Then remove the `paper_account`, `paper_positions`,
+`paper_fills`, `paper_quotes` and `paper_seal` tables from
+`~/.automaton/state.db`, **and** delete `~/.automaton/ledger.key`. If only the
+tables are gone while the key remains, the runtime treats it as tampering.
