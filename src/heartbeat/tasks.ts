@@ -43,6 +43,20 @@ export const COLONY_TASK_INTERVALS_MS = {
   dead_agent_cleanup: 3_600_000,
 } as const;
 
+/**
+ * Paper-trading mode: survival follows paper equity, not Conway credits, and the
+ * agent has no tools to top up credits or pull upstream. Waking it for those
+ * reasons only burns real inference money.
+ */
+function isTradingMode(taskCtx: HeartbeatLegacyContext): boolean {
+  return taskCtx.config.trading?.enabled === true;
+}
+
+/** Trading without a Conway API key (e.g. on a VPS): Conway credit/top-up paths cannot work. */
+function isStandaloneTrading(taskCtx: HeartbeatLegacyContext): boolean {
+  return isTradingMode(taskCtx) && !taskCtx.identity.apiKey;
+}
+
 export const BUILTIN_TASKS: Record<string, HeartbeatTaskFn> = {
   heartbeat_ping: async (ctx: TickContext, taskCtx: HeartbeatLegacyContext) => {
     // Use ctx.creditBalance instead of calling conway.getCreditsBalance()
@@ -68,8 +82,8 @@ export const BUILTIN_TASKS: Record<string, HeartbeatTaskFn> = {
 
     taskCtx.db.setKV("last_heartbeat_ping", JSON.stringify(payload));
 
-    // If critical or dead, record a distress signal
-    if (tier === "critical" || tier === "dead") {
+    // If critical or dead, record a distress signal (not in trading mode: see isTradingMode)
+    if (!isTradingMode(taskCtx) && (tier === "critical" || tier === "dead")) {
       const distressPayload = {
         level: tier,
         name: taskCtx.config.name,
@@ -137,7 +151,7 @@ export const BUILTIN_TASKS: Record<string, HeartbeatTaskFn> = {
       taskCtx.db.deleteKV("zero_credits_since");
     }
 
-    if (prevTier && prevTier !== tier && tier === "critical") {
+    if (!tradingMode && prevTier && prevTier !== tier && tier === "critical") {
       return {
         shouldWake: true,
         message: `Credits dropped to ${tier} tier: $${(credits / 100).toFixed(2)}`,
@@ -159,7 +173,11 @@ export const BUILTIN_TASKS: Record<string, HeartbeatTaskFn> = {
     }));
 
     const MIN_TOPUP_USD = 5;
-    if (balance >= MIN_TOPUP_USD && (ctx.survivalTier === "critical" || ctx.survivalTier === "dead")) {
+    if (
+      !isStandaloneTrading(taskCtx) &&
+      balance >= MIN_TOPUP_USD &&
+      (ctx.survivalTier === "critical" || ctx.survivalTier === "dead")
+    ) {
       // Cooldown: don't attempt more than once every 5 minutes to avoid
       // hammering the payment endpoint on repeated ticks.
       const AUTO_TOPUP_COOLDOWN_MS = 5 * 60 * 1000;
@@ -285,7 +303,7 @@ export const BUILTIN_TASKS: Record<string, HeartbeatTaskFn> = {
         ...repo,
         checkedAt: new Date().toISOString(),
       }));
-      if (upstream.behind > 0) {
+      if (upstream.behind > 0 && !isTradingMode(taskCtx)) {
         // Only wake if the commit count changed since last check
         const prevBehind = taskCtx.db.getKV("upstream_prev_behind");
         const behindStr = String(upstream.behind);

@@ -28,11 +28,22 @@ export class InferenceRouter {
   private db: Database;
   private registry: ModelRegistry;
   private budget: InferenceBudgetTracker;
+  private isUsable: (entry: ModelEntry) => boolean;
 
-  constructor(db: Database, registry: ModelRegistry, budget: InferenceBudgetTracker) {
+  /**
+   * @param isUsable Optional filter for models the runtime can actually call
+   *   (e.g. standalone mode without a Conway key). Defaults to "all usable".
+   */
+  constructor(
+    db: Database,
+    registry: ModelRegistry,
+    budget: InferenceBudgetTracker,
+    isUsable?: (entry: ModelEntry) => boolean,
+  ) {
     this.db = db;
     this.registry = registry;
     this.budget = budget;
+    this.isUsable = isUsable ?? (() => true);
   }
 
   /**
@@ -201,7 +212,7 @@ export class InferenceRouter {
     if (preference && preference.candidates.length > 0) {
       for (const candidateId of preference.candidates) {
         const entry = this.registry.get(candidateId);
-        if (entry && entry.enabled) {
+        if (entry && entry.enabled && this.isUsable(entry)) {
           return entry;
         }
       }
@@ -218,7 +229,7 @@ export class InferenceRouter {
     for (const modelId of fallbackIds) {
       if (!modelId) continue;
       const entry = this.registry.get(modelId);
-      if (!entry || !entry.enabled) continue;
+      if (!entry || !entry.enabled || !this.isUsable(entry)) continue;
       const isFree = entry.costPer1kInput === 0 && entry.costPer1kOutput === 0;
       const tierOk = tierRank >= (TIER_ORDER[entry.tierMinimum] ?? 0);
       if (isFree || tierOk) {

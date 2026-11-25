@@ -6,6 +6,41 @@ where its "money" comes from: **its survival tier is set by paper account
 equity**, not by Conway credits. Profitable trading keeps it alive. Losses
 push it to `low_compute`, then `critical`, then `dead`.
 
+## Running on a VPS (no Conway account needed)
+
+Trading mode can run standalone on any Linux VPS with your own LLM key.
+Without a Conway API key, these are unavailable:
+- Conway credits and top-ups
+- `create_sandbox` / `list_sandboxes`
+- the social relay and agent registry
+
+Inference goes straight to your provider: Anthropic, OpenAI or Ollama.
+
+```bash
+sudo -i
+git clone --branch trading-mode https://github.com/vickykenin-lang/Jeson-007.git /root/jeson-007
+bash /root/jeson-007/deploy/vps/install.sh          # Node 22, build, systemd units
+cd /root/jeson-007
+node dist/index.js --setup                           # wizard: name, goal, API key (Conway key optional)
+node deploy/vps/configure-trading.mjs --market NSE   # enables trading + picks models
+systemctl enable --now automaton automaton-dashboard
+journalctl -u automaton -f                           # live logs
+```
+
+To update later, run `bash /root/jeson-007/deploy/vps/install.sh` again.
+
+`configure-trading.mjs` chooses models from the keys it finds:
+- Anthropic key: `claude-sonnet-5-5`, with `claude-haiku-5-5` for the low tiers
+- OpenAI key: `gpt-5.2`, with `gpt-5-mini` for the low tiers
+- Override with `--model` / `--low-model`
+
+Without Conway, real-money spend tracking under-counts models it adds
+itself, so set a spending limit on your provider account.
+
+**Security.** The agent runs as root and has a shell. Use a VPS that runs
+nothing else important and holds no other secrets. Keep the dashboard on
+localhost and reach it with an SSH tunnel.
+
 ## Turning it on
 
 Add a `trading` block to `~/.automaton/automaton.json`. Any field you leave
@@ -32,6 +67,9 @@ out uses the default shown below.
 
     "feeBps": 5,
     "slippageBps": 5,
+
+    "idleSleepOpenSeconds": 300,
+    "idleSleepClosedSeconds": 1800,
 
     "sandboxMaxPerDay": 2,
     "sandboxMaxVcpu": 2,
@@ -182,6 +220,12 @@ runtime needs network access to that host. To use another feed, implement
 `PriceProvider` in `src/trading/market-data.ts` and call `setPriceProvider()`.
 
 ## Real costs
+
+When a turn ends with nothing to do, the agent sleeps
+`idleSleepOpenSeconds` (default 5 min) while the market is open and
+`idleSleepClosedSeconds` (default 30 min) while it is closed. Every wake is
+a real LLM call, so these two settings drive most of the inference bill.
+(Upstream sleeps only 60 s, which would be about 1,440 calls a day.)
 
 Trades are paper, but **LLM calls are paid in real money**: Conway credits,
 or your OpenAI/Anthropic key. Local Ollama costs nothing. Auto-top-up of

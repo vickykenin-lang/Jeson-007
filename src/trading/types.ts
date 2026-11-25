@@ -49,6 +49,12 @@ export interface TradingConfig {
   /** Adverse slippage applied to every fill, in basis points. */
   slippageBps: number;
 
+  // ── Idle pacing (each wake costs a real LLM call) ──
+  /** Sleep after an idle turn while the market is open. */
+  idleSleepOpenSeconds: number;
+  /** Sleep after an idle turn while the market is closed. */
+  idleSleepClosedSeconds: number;
+
   // ── Research sandboxes (real Conway credits) ──
   /** Max create_sandbox calls in any rolling 24 hours. */
   sandboxMaxPerDay: number;
@@ -87,6 +93,9 @@ export const DEFAULT_TRADING_CONFIG: TradingConfig = {
   feeBps: 5,
   slippageBps: 5,
 
+  idleSleepOpenSeconds: 300,
+  idleSleepClosedSeconds: 1800,
+
   sandboxMaxPerDay: 2,
   sandboxMaxVcpu: 2,
   sandboxMaxMemoryMb: 2048,
@@ -120,6 +129,7 @@ export function resolveTradingConfig(
     "maxSinglePositionPct", "maxOpenPositions", "dailyLossLimitPct",
     "maxOrdersPerHour", "quoteMaxAgeSeconds", "feeBps", "slippageBps",
     "sandboxMaxPerDay", "sandboxMaxVcpu", "sandboxMaxMemoryMb", "sandboxMaxDiskGb",
+    "idleSleepOpenSeconds", "idleSleepClosedSeconds",
   ];
   for (const key of numericKeys) {
     const v = merged[key] as unknown;

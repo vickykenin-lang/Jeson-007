@@ -68,6 +68,8 @@ import { isIdleOnlyTool } from "./idle-only-tools.js";
 import { createTradingTools, refreshPaperAccount } from "../trading/tools.js";
 import { selectTradingModeTools } from "../trading/tool-allowlist.js";
 import { getTradingSurvivalTier } from "../trading/risk.js";
+import { isMarketOpen } from "../trading/market-data.js";
+import { isModelUsableStandalone, prepareStandaloneModels } from "../inference/standalone.js";
 import type { TradingConfig } from "../trading/types.js";
 
 const logger = createLogger("loop");
@@ -106,6 +108,12 @@ export async function runAgentLoop(
   const tools = tradingCfg
     ? selectTradingModeTools(builtinTools, createTradingTools())
     : [...builtinTools, ...loadInstalledTools(db)];
+  /** Idle sleep: 60s upstream; in trading mode it follows market hours to save LLM calls. */
+  const idleSleepMs = (): number => {
+    if (!tradingCfg) return 60_000;
+    const open = isMarketOpen(tradingCfg.market);
+    return (open ? tradingCfg.idleSleepOpenSeconds : tradingCfg.idleSleepClosedSeconds) * 1000;
+  };
   if (tradingCfg) {
     log(config, `[TRADING] Paper trading mode: ${tradingCfg.market}, max leverage ${tradingCfg.maxLeverage}x, ${tools.length} tools.`);
   }
@@ -131,8 +139,26 @@ export async function runAgentLoop(
     const { discoverOllamaModels } = await import("../ollama/discover.js");
     await discoverOllamaModels(ollamaBaseUrl, db.raw);
   }
+  // Standalone (no Conway key, e.g. a VPS): only route to models we hold keys for,
+  // and make the creator's configured model the primary one.
+  const standalone = !identity.apiKey;
+  if (standalone) {
+    prepareStandaloneModels(modelRegistry, modelStrategyConfig, config);
+  }
   const budgetTracker = new InferenceBudgetTracker(db.raw, modelStrategyConfig);
-  const inferenceRouter = new InferenceRouter(db.raw, modelRegistry, budgetTracker);
+  const inferenceRouter = new InferenceRouter(
+    db.raw,
+    modelRegistry,
+    budgetTracker,
+    standalone ? (entry) => isModelUsableStandalone(entry, config) : undefined,
+  );
+  if (standalone && !inferenceRouter.selectModel("high", "agent_turn")) {
+    logger.error(
+      `[MODEL] No usable model for "${config.inferenceModel}" without a Conway key. ` +
+        "Set inferenceModel to a model you hold a key for (e.g. claude-sonnet-5-5 with anthropicApiKey, " +
+        "a gpt-* model with openaiApiKey, or an Ollama model with ollamaBaseUrl).",
+    );
+  }
 
   // Optional orchestration bootstrap (requires V9 goals/task tables)
   let planModeController: PlanModeController | undefined;
@@ -882,7 +908,7 @@ export async function runAgentLoop(
         idleTurnCount++;
         if (idleTurnCount >= MAX_IDLE_TURNS) {
           log(config, `[IDLE] ${idleTurnCount} consecutive idle turns with no work. Entering sleep.`);
-          db.setKV("sleep_until", new Date(Date.now() + 60_000).toISOString());
+          db.setKV("sleep_until", new Date(Date.now() + idleSleepMs()).toISOString());
           db.setAgentState("sleeping");
           onStateChange?.("sleeping");
           running = false;
@@ -913,10 +939,11 @@ export async function runAgentLoop(
       ) {
         // Agent produced text without tool calls.
         // This is a natural pause point -- no work queued, sleep briefly.
-        log(config, "[IDLE] No pending inputs. Entering brief sleep.");
+        const idleMs = idleSleepMs();
+        log(config, `[IDLE] No pending inputs. Sleeping ${Math.round(idleMs / 1000)}s.`);
         db.setKV(
           "sleep_until",
-          new Date(Date.now() + 60_000).toISOString(),
+          new Date(Date.now() + idleMs).toISOString(),
         );
         db.setAgentState("sleeping");
         onStateChange?.("sleeping");

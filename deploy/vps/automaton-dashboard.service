@@ -1,0 +1,15 @@
+[Unit]
+Description=Jeson-007 live dashboard (read-only, localhost only)
+After=automaton.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=__APP_DIR__
+Environment=HOME=/root
+ExecStart=/usr/bin/env node dist/dashboard/server.js --host 127.0.0.1 --port 4747
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

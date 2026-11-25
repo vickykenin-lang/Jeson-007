@@ -196,10 +196,17 @@ async function run(): Promise<void> {
   // Load wallet (chain-aware)
   const { account, chainIdentity, chainType: walletChainType } = await getWallet();
   const resolvedChainType = config.chainType || walletChainType || "evm";
-  const apiKey = config.conwayApiKey || loadApiKeyFromConfig();
+  const apiKey = config.conwayApiKey || loadApiKeyFromConfig() || "";
   if (!apiKey) {
-    logger.error("No API key found. Run: automaton --provision");
-    process.exit(1);
+    if (config.trading?.enabled) {
+      // Standalone paper trading (e.g. on a VPS): survival follows paper equity and
+      // inference uses the configured OpenAI/Anthropic/Ollama backend. Conway-only
+      // features (credits, sandboxes, social relay, registry) will simply be unavailable.
+      logger.warn("No Conway API key: running paper trading in standalone mode (Conway features disabled).");
+    } else {
+      logger.error("No API key found. Run: automaton --provision");
+      process.exit(1);
+    }
   }
 
   // Initialize database
