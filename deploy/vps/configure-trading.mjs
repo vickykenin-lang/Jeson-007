@@ -10,6 +10,7 @@
  *   node deploy/vps/configure-trading.mjs --llm-base-url http://127.0.0.1:3001/v1 --model <name>
  *   It asks for that endpoint's API key without showing it (or keeps the saved one;
  *   pass --ask-key to replace it). The base URL includes the version path (/v1).
+ *   Leave out --model to save the URL and key and list the models that endpoint offers.
  *
  * Model defaults (when --model is not given):
  *   Anthropic key present → claude-sonnet-5-5 (low tiers: claude-haiku-5-5)
@@ -77,18 +78,41 @@ if (llmBaseUrl) {
     console.error("--llm-base-url must look like http://127.0.0.1:3001/v1");
     process.exit(1);
   }
-  if (!model) {
-    console.error("--model is required with --llm-base-url (a model name that endpoint serves).");
-    process.exit(1);
-  }
+  const baseChanged = cfg.openaiBaseUrl !== llmBaseUrl.replace(/\/+$/, "");
   cfg.openaiBaseUrl = llmBaseUrl.replace(/\/+$/, "");
-  if (!cfg.openaiApiKey || args.includes("--ask-key")) {
+  if (!cfg.openaiApiKey || baseChanged || args.includes("--ask-key")) {
     const key = await askHidden(`API key for ${cfg.openaiBaseUrl} (input hidden): `);
     if (!key) {
       console.error("No key entered; nothing changed.");
       process.exit(1);
     }
     cfg.openaiApiKey = key;
+  }
+  if (!model) {
+    // Save URL + key, then show what this endpoint serves so the user can pick a model.
+    fs.writeFileSync(file, JSON.stringify(cfg, null, 2), { mode: 0o600 });
+    let ids = [];
+    try {
+      const res = await fetch(`${cfg.openaiBaseUrl}/models`, {
+        headers: { Authorization: `Bearer ${cfg.openaiApiKey}` },
+        signal: AbortSignal.timeout(20_000),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const body = await res.json();
+      // Gemini lists ids as "models/<name>"; its chat endpoint takes the bare <name>.
+      ids = (body.data ?? body.models ?? [])
+        .map((m) => String(m.id ?? m.name ?? "").replace(/^models\//, ""))
+        .filter(Boolean)
+        .sort();
+    } catch (err) {
+      console.error(`Saved the URL and key, but could not list models: ${err.message}`);
+      console.error("Check the key and URL, then run again with --model <name> from the provider's docs.");
+      process.exit(1);
+    }
+    console.log(`Saved. Models offered by ${cfg.openaiBaseUrl} (${ids.length}):`);
+    for (const id of ids) console.log(`  ${id}`);
+    console.log("\nRun again with --model <one of these> to finish (the key is already saved).");
+    process.exit(0);
   }
   lowModel ??= model;
 } else if (!model) {
