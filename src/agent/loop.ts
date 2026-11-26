@@ -150,13 +150,20 @@ export async function runAgentLoop(
     db.raw,
     modelRegistry,
     budgetTracker,
-    standalone ? (entry) => isModelUsableStandalone(entry, config) : undefined,
+    standalone
+      ? (entry) =>
+          isModelUsableStandalone(
+            entry,
+            config,
+            new Set([modelStrategyConfig.inferenceModel, modelStrategyConfig.lowComputeModel, modelStrategyConfig.criticalModel]),
+          )
+      : undefined,
   );
   if (standalone && !inferenceRouter.selectModel("high", "agent_turn")) {
     logger.error(
       `[MODEL] No usable model for "${config.inferenceModel}" without a Conway key. ` +
         "Set inferenceModel to a model you hold a key for (e.g. claude-sonnet-5-5 with anthropicApiKey, " +
-        "a gpt-* model with openaiApiKey, or an Ollama model with ollamaBaseUrl).",
+        "a gpt-* model with openaiApiKey, any model your openaiBaseUrl endpoint serves, or an Ollama model with ollamaBaseUrl).",
     );
   }
 

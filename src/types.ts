@@ -50,6 +50,8 @@ export interface AutomatonConfig {
   conwayApiUrl: string;
   conwayApiKey: string;
   openaiApiKey?: string;
+  /** OpenAI-compatible base URL incl. version path (e.g. http://127.0.0.1:3001/v1). Unset = api.openai.com. */
+  openaiBaseUrl?: string;
   anthropicApiKey?: string;
   ollamaBaseUrl?: string;
   inferenceModel: string;

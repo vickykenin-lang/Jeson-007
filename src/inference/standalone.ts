@@ -11,9 +11,20 @@
 import type { AutomatonConfig, ModelEntry, ModelProvider, ModelStrategyConfig } from "../types.js";
 import type { ModelRegistry } from "./registry.js";
 
-type Keys = Pick<AutomatonConfig, "openaiApiKey" | "anthropicApiKey" | "ollamaBaseUrl">;
+type Keys = Pick<AutomatonConfig, "openaiApiKey" | "openaiBaseUrl" | "anthropicApiKey" | "ollamaBaseUrl">;
 
-export function isModelUsableStandalone(entry: ModelEntry, keys: Keys): boolean {
+/**
+ * @param configuredModels With a custom openaiBaseUrl, only these model IDs are
+ *   routed to it: the built-in gpt-* registry entries would not exist there.
+ */
+export function isModelUsableStandalone(
+  entry: ModelEntry,
+  keys: Keys,
+  configuredModels?: ReadonlySet<string>,
+): boolean {
+  if (entry.provider === "openai" && keys.openaiBaseUrl && configuredModels && !configuredModels.has(entry.modelId)) {
+    return false;
+  }
   switch (entry.provider) {
     case "ollama":
       return Boolean(keys.ollamaBaseUrl);
@@ -30,6 +41,8 @@ export function isModelUsableStandalone(entry: ModelEntry, keys: Keys): boolean 
 export function inferStandaloneProvider(modelId: string, keys: Keys): ModelProvider | null {
   if (keys.anthropicApiKey && /^claude/i.test(modelId)) return "anthropic";
   if (keys.openaiApiKey && /^(gpt-|o[1-9]|chatgpt)/i.test(modelId)) return "openai";
+  // Custom OpenAI-compatible endpoint (FreeLLMAPI, Groq, OpenRouter...): any model name.
+  if (keys.openaiApiKey && keys.openaiBaseUrl) return "openai";
   if (keys.ollamaBaseUrl) return "ollama";
   return null;
 }
@@ -76,6 +89,11 @@ export function prepareStandaloneModels(
   const ensure = (modelId: string | undefined): boolean => {
     if (!modelId) return false;
     const existing = registry.get(modelId);
+    // With a custom OpenAI-compatible endpoint, built-in gpt-* defaults (e.g. gpt-5-mini as the
+    // low-tier model) are not served there; only the primary model the creator chose is.
+    if (existing && config.openaiBaseUrl && existing.provider === "openai" && modelId !== strategy.inferenceModel) {
+      return false;
+    }
     if (existing) return existing.enabled && isModelUsableStandalone(existing, config);
     const provider = inferStandaloneProvider(modelId, config);
     if (!provider) return false;

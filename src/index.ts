@@ -298,11 +298,15 @@ async function run(): Promise<void> {
     maxTokens: config.maxTokensPerTurn,
     lowComputeModel: config.modelStrategy?.lowComputeModel || "gpt-5-mini",
     openaiApiKey: config.openaiApiKey,
+    openaiBaseUrl: config.openaiBaseUrl,
     anthropicApiKey: config.anthropicApiKey,
     ollamaBaseUrl,
     getModelProvider: (modelId) => modelRegistry.get(modelId)?.provider,
   });
 
+  if (config.openaiBaseUrl) {
+    logger.info(`[${new Date().toISOString()}] OpenAI-compatible backend: ${config.openaiBaseUrl}`);
+  }
   if (ollamaBaseUrl) {
     logger.info(`[${new Date().toISOString()}] Ollama backend: ${ollamaBaseUrl}`);
   }

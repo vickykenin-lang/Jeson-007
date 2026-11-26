@@ -6,6 +6,11 @@
  *   node deploy/vps/configure-trading.mjs [--market NSE|US] [--capital 100000]
  *        [--model <id>] [--low-model <id>] [--leverage 5]
  *
+ * Free / OpenAI-compatible LLM (FreeLLMAPI, Groq, OpenRouter...):
+ *   node deploy/vps/configure-trading.mjs --llm-base-url http://127.0.0.1:3001/v1 --model <name>
+ *   It asks for that endpoint's API key without showing it (or keeps the saved one;
+ *   pass --ask-key to replace it). The base URL includes the version path (/v1).
+ *
  * Model defaults (when --model is not given):
  *   Anthropic key present → claude-sonnet-5-5 (low tiers: claude-haiku-5-5)
  *   otherwise OpenAI key  → gpt-5.2 (low tiers: gpt-5-mini)
@@ -14,6 +19,25 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
+import readline from "readline";
+
+/** Read a line from the terminal without echoing it. */
+function askHidden(prompt) {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+    const write = rl._writeToOutput.bind(rl);
+    let muted = false;
+    rl._writeToOutput = (str) => {
+      if (!muted) write(str);
+    };
+    rl.question(prompt, (answer) => {
+      rl.close();
+      process.stdout.write("\n");
+      resolve(answer.trim());
+    });
+    muted = true;
+  });
+}
 
 const args = process.argv.slice(2);
 const get = (flag) => {
@@ -47,7 +71,27 @@ cfg.trading = {
 
 let model = get("--model");
 let lowModel = get("--low-model");
-if (!model) {
+const llmBaseUrl = get("--llm-base-url");
+if (llmBaseUrl) {
+  if (!/^https?:\/\/[^\s]+$/.test(llmBaseUrl)) {
+    console.error("--llm-base-url must look like http://127.0.0.1:3001/v1");
+    process.exit(1);
+  }
+  if (!model) {
+    console.error("--model is required with --llm-base-url (a model name that endpoint serves).");
+    process.exit(1);
+  }
+  cfg.openaiBaseUrl = llmBaseUrl.replace(/\/+$/, "");
+  if (!cfg.openaiApiKey || args.includes("--ask-key")) {
+    const key = await askHidden(`API key for ${cfg.openaiBaseUrl} (input hidden): `);
+    if (!key) {
+      console.error("No key entered; nothing changed.");
+      process.exit(1);
+    }
+    cfg.openaiApiKey = key;
+  }
+  lowModel ??= model;
+} else if (!model) {
   if (cfg.anthropicApiKey) {
     model = "claude-sonnet-5-5";
     lowModel ??= "claude-haiku-5-5";
@@ -69,7 +113,7 @@ fs.writeFileSync(file, JSON.stringify(cfg, null, 2), { mode: 0o600 });
 
 const providers = [
   cfg.anthropicApiKey ? "Anthropic" : null,
-  cfg.openaiApiKey ? "OpenAI" : null,
+  cfg.openaiApiKey ? (cfg.openaiBaseUrl ? `OpenAI-compatible (${cfg.openaiBaseUrl})` : "OpenAI") : null,
   cfg.ollamaBaseUrl ? "Ollama" : null,
   cfg.conwayApiKey ? "Conway" : null,
 ].filter(Boolean);

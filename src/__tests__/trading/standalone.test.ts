@@ -69,6 +69,26 @@ describe("standalone model routing", () => {
     expect(router.selectModel("high", "agent_turn")).toBeNull();
   });
 
+  it("custom OpenAI-compatible endpoint (FreeLLMAPI etc.): routes only to the configured model", () => {
+    const keys = { openaiApiKey: "k", openaiBaseUrl: "http://127.0.0.1:3001/v1", inferenceModel: "free-model-x" };
+    const registry = new ModelRegistry(db.raw);
+    registry.initialize();
+    const strategy: ModelStrategyConfig = { ...DEFAULT_MODEL_STRATEGY_CONFIG };
+    prepareStandaloneModels(registry, strategy, keys);
+    const configured = new Set([strategy.inferenceModel, strategy.lowComputeModel, strategy.criticalModel]);
+    const router = new InferenceRouter(
+      db.raw,
+      registry,
+      new InferenceBudgetTracker(db.raw, strategy),
+      (e) => isModelUsableStandalone(e, keys, configured),
+    );
+    expect(registry.get("free-model-x")?.provider).toBe("openai");
+    for (const tier of ["high", "normal", "low_compute", "critical"] as const) {
+      // never the built-in gpt-5.2 entry, which the gateway would not serve
+      expect(router.selectModel(tier, "agent_turn")?.modelId, tier).toBe("free-model-x");
+    }
+  });
+
   it("with Conway (no filter) routing is unchanged", () => {
     const { router } = setup(db, {}, false);
     expect(router.selectModel("high", "agent_turn")?.modelId).toBe("gpt-5.2");

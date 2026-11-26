@@ -25,6 +25,13 @@ interface InferenceClientOptions {
   maxTokens: number;
   lowComputeModel?: string;
   openaiApiKey?: string;
+  /**
+   * OpenAI-compatible base URL including the version path, e.g.
+   * "http://127.0.0.1:3001/v1" (FreeLLMAPI) or "https://api.groq.com/openai/v1".
+   * Requests go to `${openaiBaseUrl}/chat/completions` with openaiApiKey.
+   * Unset = api.openai.com.
+   */
+  openaiBaseUrl?: string;
   anthropicApiKey?: string;
   ollamaBaseUrl?: string;
   /** Optional registry lookup — if provided, used before name heuristics */
@@ -49,10 +56,11 @@ export function createInferenceClient(
   options: InferenceClientOptions,
 ): InferenceClient {
   const { apiUrl, apiKey, openaiApiKey, anthropicApiKey, ollamaBaseUrl, getModelProvider } = options;
+  const openaiBaseUrl = options.openaiBaseUrl?.trim().replace(/\/+$/, "") || undefined;
   const httpClient = new ResilientHttpClient({
     baseTimeout: INFERENCE_TIMEOUT_MS,
     retryableStatuses: [429, 500, 502, 503, 504],
-    allowHttpOnLoopback: isLoopbackHttpUrl(ollamaBaseUrl),
+    allowHttpOnLoopback: isLoopbackHttpUrl(ollamaBaseUrl) || isLoopbackHttpUrl(openaiBaseUrl),
   });
   let currentModel = options.defaultModel;
   let maxTokens = options.maxTokens;
@@ -66,6 +74,7 @@ export function createInferenceClient(
 
     const backend = resolveInferenceBackend(model, {
       openaiApiKey,
+      openaiBaseUrl,
       anthropicApiKey,
       ollamaBaseUrl,
       getModelProvider,
@@ -110,10 +119,12 @@ export function createInferenceClient(
       });
     }
 
-    const openAiLikeApiUrl =
-      backend === "openai" ? "https://api.openai.com" :
-      backend === "ollama" ? (ollamaBaseUrl as string).replace(/\/$/, "") :
-      apiUrl;
+    const chatCompletionsUrl =
+      backend === "openai"
+        ? `${openaiBaseUrl ?? "https://api.openai.com/v1"}/chat/completions`
+        : backend === "ollama"
+          ? `${(ollamaBaseUrl as string).replace(/\/$/, "")}/v1/chat/completions`
+          : `${apiUrl}/v1/chat/completions`;
     const openAiLikeApiKey =
       backend === "openai" ? (openaiApiKey as string) :
       backend === "ollama" ? "ollama" :
@@ -122,7 +133,7 @@ export function createInferenceClient(
     return chatViaOpenAiCompatible({
       model,
       body,
-      apiUrl: openAiLikeApiUrl,
+      url: chatCompletionsUrl,
       apiKey: openAiLikeApiKey,
       backend,
       httpClient,
@@ -178,6 +189,7 @@ function resolveInferenceBackend(
   model: string,
   keys: {
     openaiApiKey?: string;
+    openaiBaseUrl?: string;
     anthropicApiKey?: string;
     ollamaBaseUrl?: string;
     getModelProvider?: (modelId: string) => string | undefined;
@@ -196,6 +208,8 @@ function resolveInferenceBackend(
   // Heuristic fallback (model not in registry yet)
   if (keys.anthropicApiKey && /^claude/i.test(model)) return "anthropic";
   if (keys.openaiApiKey && /^(gpt-[3-9]|gpt-4|gpt-5|o[1-9][-\s.]|o[1-9]$|chatgpt)/i.test(model)) return "openai";
+  // A custom OpenAI-compatible endpoint (FreeLLMAPI, Groq, OpenRouter...) serves any model name.
+  if (keys.openaiApiKey && keys.openaiBaseUrl) return "openai";
   return "conway";
 
 }
@@ -203,12 +217,13 @@ function resolveInferenceBackend(
 async function chatViaOpenAiCompatible(params: {
   model: string;
   body: Record<string, unknown>;
-  apiUrl: string;
+  /** Full chat-completions URL. */
+  url: string;
   apiKey: string;
   backend: "conway" | "openai" | "ollama";
   httpClient: ResilientHttpClient;
 }): Promise<InferenceResponse> {
-  const resp = await params.httpClient.request(`${params.apiUrl}/v1/chat/completions`, {
+  const resp = await params.httpClient.request(params.url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

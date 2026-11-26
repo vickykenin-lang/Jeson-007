@@ -219,6 +219,37 @@ added automatically, so `RELIANCE` is fetched as `RELIANCE.NS`. Your
 runtime needs network access to that host. To use another feed, implement
 `PriceProvider` in `src/trading/market-data.ts` and call `setPriceProvider()`.
 
+## Zero-cost LLM (FreeLLMAPI or any OpenAI-compatible endpoint)
+
+The agent can use any OpenAI-compatible `/chat/completions` endpoint instead
+of api.openai.com. Examples:
+- [FreeLLMAPI](https://github.com/tashfeenahmed/freellmapi), which pools free
+  tiers of many providers behind one key
+- Groq, OpenRouter, or a provider's own OpenAI-compatible URL
+
+```bash
+node deploy/vps/configure-trading.mjs --llm-base-url http://127.0.0.1:3001/v1 --model <model-name>
+```
+
+- The base URL includes the version path (`/v1`). Requests go to
+  `<base>/chat/completions`.
+- The script asks for that endpoint's key with input hidden. For FreeLLMAPI
+  this is its *unified* key. It is stored as `openaiApiKey`, and the URL as
+  `openaiBaseUrl`, in `~/.automaton/automaton.json`.
+- `--model` must be a name the endpoint serves. Only that model is routed
+  there; the built-in gpt-* entries are not used.
+
+Caveats:
+- Free models are weaker at tool use and multi-step decisions than Claude/GPT.
+- Free tiers have rate limits; the agent wakes about every 5 min while the
+  market is open.
+- Each provider has its own terms. FreeLLMAPI describes itself as being for
+  personal experimentation.
+- FreeLLMAPI itself must run somewhere (it is a Node/TypeScript service). On a
+  1 GB VPS it competes with the agent for memory, so check its footprint
+  first, or point the agent at a single free provider's OpenAI-compatible URL
+  directly.
+
 ## Real costs
 
 When a turn ends with nothing to do, the agent sleeps
