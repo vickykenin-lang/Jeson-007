@@ -6,6 +6,7 @@
 #
 # Options (environment variables):
 #   OCPUS=2 MEMORY_GB=12        shape size (Always Free A1 total: 2 OCPU / 12 GB)
+#   SHAPE=VM.Standard.E2.1.Micro   create the Always Free AMD micro instead (fixed size)
 #   NAME=jeson-007              instance name
 #   SUBNET_NAME=hermes-public-subnet
 #   WAIT_SECONDS=60             pause between attempts (OCI may rate-limit below ~60)
@@ -20,7 +21,14 @@ NAME="${NAME:-jeson-007}"
 SUBNET_NAME="${SUBNET_NAME:-hermes-public-subnet}"
 WAIT_SECONDS="${WAIT_SECONDS:-60}"
 KEY="${KEY:-$HOME/.ssh/jeson007}"
-SHAPE="VM.Standard.A1.Flex"
+SHAPE="${SHAPE:-VM.Standard.A1.Flex}"
+# Flex shapes need an explicit size; fixed shapes (E2.1.Micro) must not get one.
+SHAPE_ARGS=()
+SIZE_LABEL="fixed size"
+if [[ "$SHAPE" == *.Flex ]]; then
+  SHAPE_ARGS=(--shape-config "{\"ocpus\": $OCPUS, \"memoryInGBs\": $MEMORY_GB}")
+  SIZE_LABEL="${OCPUS} OCPU / ${MEMORY_GB} GB"
+fi
 
 COMPARTMENT="${COMPARTMENT:-${OCI_TENANCY:-}}"
 if [ -z "$COMPARTMENT" ]; then
@@ -71,14 +79,14 @@ fi
 attempt=0
 while true; do
   attempt=$((attempt + 1))
-  echo "==> Attempt $attempt at $(date -u +%H:%M:%S) UTC: $SHAPE ${OCPUS} OCPU / ${MEMORY_GB} GB"
+  echo "==> Attempt $attempt at $(date -u +%H:%M:%S) UTC: $SHAPE ($SIZE_LABEL)"
   # --no-retry: fail fast on "out of capacity" instead of the CLI's own long internal retries
   out="$(oci --no-retry compute instance launch \
     --availability-domain "$AD" \
     --compartment-id "$COMPARTMENT" \
     --display-name "$NAME" \
     --shape "$SHAPE" \
-    --shape-config "{\"ocpus\": $OCPUS, \"memoryInGBs\": $MEMORY_GB}" \
+    "${SHAPE_ARGS[@]}" \
     --image-id "$IMAGE" \
     --subnet-id "$SUBNET" \
     --assign-public-ip true \
