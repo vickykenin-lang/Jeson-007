@@ -27,7 +27,7 @@ import type {
 import { DEFAULT_MODEL_STRATEGY_CONFIG } from "../types.js";
 import type { PolicyEngine } from "./policy-engine.js";
 import { buildSystemPrompt, buildWakeupPrompt } from "./system-prompt.js";
-import { buildContextMessages, trimContext } from "./context.js";
+import { buildContextMessages, normalizeMessagesForInference, trimContext } from "./context.js";
 import {
   createBuiltinTools,
   loadInstalledTools,
@@ -437,6 +437,10 @@ export async function runAgentLoop(
   while (running) {
     // Declared outside try so the catch block can access for retry/failure handling
     let claimedMessages: InboxMessageRow[] = [];
+    // The input this turn consumed; put back if the turn fails before it is persisted,
+    // otherwise the retry is sent with no user message at all (Gemini: "contents is not specified").
+    let consumedInput: { content: string; source: string } | undefined;
+    let turnPersisted = false;
 
     try {
       // Check if we should be sleeping
@@ -652,9 +656,14 @@ export async function runAgentLoop(
 
       // Capture input before clearing
       const currentInput = pendingInput;
+      consumedInput = currentInput;
 
       // Clear pending input after use
       pendingInput = undefined;
+
+      // One leading system message and at least one user message: some
+      // OpenAI-compatible providers (Gemini) reject anything else.
+      messages = normalizeMessagesForInference(messages);
 
       // ── Inference Call (via router when available) ──
       const survivalTier = financial.tierOverride ?? getSurvivalTier(financial.creditsCents);
@@ -757,6 +766,7 @@ export async function runAgentLoop(
           markInboxProcessed(db.raw, claimedIds);
         }
       });
+      turnPersisted = true;
       onTurnComplete?.(turn);
 
       // Phase 2.2: Post-turn memory ingestion (non-blocking)
@@ -961,6 +971,12 @@ export async function runAgentLoop(
     } catch (err: any) {
       consecutiveErrors++;
       log(config, `[ERROR] Turn failed: ${err.message}`);
+
+      // Retry with the same input (wakeup prompt, system notice). Inbox messages
+      // are re-claimed from the inbox below, so they are not restored here.
+      if (!turnPersisted && consumedInput && consumedInput.source !== "agent" && !pendingInput) {
+        pendingInput = consumedInput;
+      }
 
       // Handle inbox message state on turn failure:
       // Messages that have retries remaining go back to 'received';

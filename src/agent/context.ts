@@ -163,11 +163,12 @@ export function buildContextMessages(
       });
     }
 
-    // The agent's thinking as assistant message
-    if (turn.thinking) {
+    // The agent's thinking (and/or tool calls) as assistant message.
+    // Tool-call-only turns have empty thinking; they still belong in history.
+    if (turn.thinking || turn.toolCalls.length > 0) {
       const msg: ChatMessage = {
         role: "assistant",
-        content: turn.thinking,
+        content: turn.thinking || "",
       };
 
       // If there were tool calls, include them
@@ -230,6 +231,36 @@ export function buildContextMessages(
   }
 
   return messages;
+}
+
+const CONTINUE_PROMPT =
+  "[system] No new input. Continue your work: check your plan and positions, then take the next useful action.";
+
+/**
+ * Shape the message list so every chat provider accepts it:
+ * - all system messages merged into one leading system message
+ *   (Gemini's OpenAI layer turns them into a single system instruction);
+ * - the conversation starts with a user message and is never empty
+ *   (Gemini: "contents is not specified"; Anthropic: first message must be user);
+ * - it does not end on a plain assistant reply.
+ */
+export function normalizeMessagesForInference(messages: ChatMessage[]): ChatMessage[] {
+  const systemParts = messages
+    .filter((m) => m.role === "system" && typeof m.content === "string" && m.content.trim())
+    .map((m) => m.content as string);
+  const rest = messages.filter((m) => m.role !== "system");
+
+  if (rest.length === 0 || rest[0].role !== "user") {
+    rest.unshift({ role: "user", content: rest.length === 0 ? CONTINUE_PROMPT : "[system] Recent history follows." });
+  }
+  const last = rest[rest.length - 1];
+  if (last.role === "assistant" && !(last.tool_calls && last.tool_calls.length > 0)) {
+    rest.push({ role: "user", content: CONTINUE_PROMPT });
+  }
+
+  return systemParts.length > 0
+    ? [{ role: "system", content: systemParts.join("\n\n") }, ...rest]
+    : rest;
 }
 
 /**
