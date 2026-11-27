@@ -294,6 +294,9 @@ export const BUILTIN_TASKS: Record<string, HeartbeatTaskFn> = {
   },
 
   check_for_updates: async (_ctx: TickContext, taskCtx: HeartbeatLegacyContext) => {
+    // Trading mode has no upstream-pull tools, and its branch is not origin/main;
+    // running `git fetch origin main` here only logs "couldn't find remote ref main".
+    if (isTradingMode(taskCtx)) return { shouldWake: false };
     try {
       const { checkUpstream, getRepoInfo } = await import("../self-mod/upstream.js");
       const repo = getRepoInfo();

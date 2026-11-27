@@ -251,6 +251,12 @@ async function run(): Promise<void> {
     apiKey,
     sandboxId: config.sandboxId,
   });
+  if (!apiKey && config.trading?.enabled) {
+    // Standalone paper trading: there is no Conway account, so the credits API can only
+    // answer 401. Report zero instead of logging an error every minute; survival follows
+    // paper equity in trading mode anyway.
+    conway.getCreditsBalance = async () => 0;
+  }
 
   // Register automaton identity (one-time, immutable)
   const registrationState = db.getIdentity("conwayRegistrationStatus");
