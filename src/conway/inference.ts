@@ -57,11 +57,24 @@ export function createInferenceClient(
 ): InferenceClient {
   const { apiUrl, apiKey, openaiApiKey, anthropicApiKey, ollamaBaseUrl, getModelProvider } = options;
   const openaiBaseUrl = options.openaiBaseUrl?.trim().replace(/\/+$/, "") || undefined;
-  const httpClient = new ResilientHttpClient({
-    baseTimeout: INFERENCE_TIMEOUT_MS,
-    retryableStatuses: [429, 500, 502, 503, 504],
-    allowHttpOnLoopback: isLoopbackHttpUrl(ollamaBaseUrl) || isLoopbackHttpUrl(openaiBaseUrl),
-  });
+  // One client (and so one circuit breaker) per model: one overloaded model must
+  // not block a fallback model on the same host.
+  // On a custom OpenAI-compatible endpoint (free tiers such as Gemini) a 429 means
+  // quota: retrying it at once only spends more of the quota, so it is not retried.
+  const httpClients = new Map<string, ResilientHttpClient>();
+  const clientFor = (model: string): ResilientHttpClient => {
+    let client = httpClients.get(model);
+    if (!client) {
+      client = new ResilientHttpClient({
+        baseTimeout: INFERENCE_TIMEOUT_MS,
+        retryableStatuses: openaiBaseUrl ? [500, 502, 503, 504] : [429, 500, 502, 503, 504],
+        maxRetries: openaiBaseUrl ? 1 : 3,
+        allowHttpOnLoopback: isLoopbackHttpUrl(ollamaBaseUrl) || isLoopbackHttpUrl(openaiBaseUrl),
+      });
+      httpClients.set(model, client);
+    }
+    return client;
+  };
   let currentModel = options.defaultModel;
   let maxTokens = options.maxTokens;
 
@@ -71,6 +84,7 @@ export function createInferenceClient(
   ): Promise<InferenceResponse> => {
     const model = opts?.model || currentModel;
     const tools = opts?.tools;
+    const httpClient = clientFor(model);
 
     const backend = resolveInferenceBackend(model, {
       openaiApiKey,

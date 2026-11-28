@@ -107,6 +107,53 @@ describe("standalone model routing", () => {
     expect(route()).toBe("gemini-x-flash");
   });
 
+  describe("fallback to the next configured model on capacity errors", () => {
+    const keys = { openaiApiKey: "k", openaiBaseUrl: "https://example.test/v1beta/openai", inferenceModel: "gem-main" };
+    function build() {
+      const registry = new ModelRegistry(db.raw);
+      registry.initialize();
+      const strategy: ModelStrategyConfig = { ...DEFAULT_MODEL_STRATEGY_CONFIG, lowComputeModel: "gem-lite", criticalModel: "gem-lite" };
+      prepareStandaloneModels(registry, strategy, keys);
+      const configured = new Set([strategy.inferenceModel, strategy.lowComputeModel, strategy.criticalModel]);
+      return new InferenceRouter(db.raw, registry, new InferenceBudgetTracker(db.raw, strategy), (e) =>
+        isModelUsableStandalone(e, keys, configured),
+      );
+    }
+    const req = { messages: [{ role: "system", content: "s" }, { role: "user", content: "u" }], taskType: "agent_turn", tier: "high", sessionId: "s" } as any;
+    const ok = { message: { content: "hi", role: "assistant" }, usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, finishReason: "stop" };
+
+    it("503 on the main model → answered by the lite model in the same turn", async () => {
+      const calls: string[] = [];
+      const result = await build().route(req, async (_m, opts) => {
+        calls.push(opts.model);
+        if (opts.model === "gem-main") throw new Error("Inference error (openai): 503: high demand");
+        return ok;
+      });
+      expect(calls).toEqual(["gem-main", "gem-lite"]);
+      expect(result.model).toBe("gem-lite");
+      expect(result.content).toBe("hi");
+    });
+
+    it("daily quota 429 on every model → the last error is thrown", async () => {
+      await expect(
+        build().route(req, async () => {
+          throw new Error('Inference error (openai): 429: {"quotaId":"GenerateRequestsPerDayPerProjectPerModel-FreeTier"}');
+        }),
+      ).rejects.toThrow(/429/);
+    });
+
+    it("a non-capacity error (400) is not retried on another model", async () => {
+      const calls: string[] = [];
+      await expect(
+        build().route(req, async (_m, opts) => {
+          calls.push(opts.model);
+          throw new Error("Inference error (openai): 400: bad request");
+        }),
+      ).rejects.toThrow(/400/);
+      expect(calls).toEqual(["gem-main"]);
+    });
+  });
+
   it("with Conway (no filter) routing is unchanged", () => {
     const { router } = setup(db, {}, false);
     expect(router.selectModel("high", "agent_turn")?.modelId).toBe("gpt-5.2");

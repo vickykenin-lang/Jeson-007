@@ -133,6 +133,21 @@ describe("agent loop request shape (Gemini rules)", () => {
     expect(inference.calls[1].messages.map((m) => m.content)).toEqual(inference.calls[0].messages.map((m) => m.content));
   });
 
+  it("daily quota exhausted: sleeps an hour after one attempt instead of burning retries", async () => {
+    class QuotaGone extends MockInferenceClient {
+      async chat(messages: ChatMessage[], options?: InferenceOptions): Promise<InferenceResponse> {
+        this.calls.push({ messages, options });
+        throw new Error('Inference error (openai): 429: {"quotaId":"GenerateRequestsPerDayPerProjectPerModel-FreeTier"}');
+      }
+    }
+    const inference = new QuotaGone();
+    const started = Date.now();
+    await run(inference);
+    expect(inference.calls.length).toBe(1);
+    const sleepUntil = new Date(db.getKV("sleep_until") ?? 0).getTime();
+    expect(sleepUntil - started).toBeGreaterThan(55 * 60_000);
+  });
+
   it("every request across several tool-only turns has exactly one leading system message and a user message", async () => {
     const inference = new GeminiLikeInference([
       toolCallResponse([{ name: "get_portfolio", arguments: {} }]),

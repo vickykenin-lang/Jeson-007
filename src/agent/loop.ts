@@ -48,7 +48,7 @@ import type { InboxMessageRow } from "../state/database.js";
 import { ulid } from "ulid";
 import { ModelRegistry } from "../inference/registry.js";
 import { InferenceBudgetTracker } from "../inference/budget.js";
-import { InferenceRouter } from "../inference/router.js";
+import { InferenceRouter, isCapacityError, isDailyQuotaError } from "../inference/router.js";
 import { MemoryRetriever } from "../memory/retrieval.js";
 import { MemoryIngestionPipeline } from "../memory/ingestion.js";
 import { DEFAULT_MEMORY_BUDGET } from "../types.js";
@@ -987,6 +987,25 @@ export async function runAgentLoop(
         pendingInput = consumedInput;
       }
 
+      // Every configured model is out of its daily quota (free tier): retrying
+      // every few minutes only logs errors. Check again in an hour.
+      if (isDailyQuotaError(err)) {
+        const until = new Date(Date.now() + 60 * 60_000).toISOString();
+        log(config, `[QUOTA] Daily LLM quota exhausted for every configured model. Sleeping until ${until}.`);
+        if (claimedMessages.length > 0) resetInboxToReceived(db.raw, claimedMessages.map((m) => m.id));
+        db.setKV("sleep_until", until);
+        db.setAgentState("sleeping");
+        onStateChange?.("sleeping");
+        running = false;
+        break;
+      }
+
+      // Open circuit: wait for it to close instead of burning the error budget instantly.
+      if (err?.name === "CircuitOpenError" && typeof err.resetAt === "number") {
+        const waitMs = Math.min(Math.max(err.resetAt - Date.now(), 0), 60_000);
+        if (waitMs > 0) await new Promise((r) => setTimeout(r, waitMs));
+      }
+
       // Handle inbox message state on turn failure:
       // Messages that have retries remaining go back to 'received';
       // messages that have exhausted retries move to 'failed'.
@@ -1011,9 +1030,11 @@ export async function runAgentLoop(
         );
         db.setAgentState("sleeping");
         onStateChange?.("sleeping");
+        // Overloaded / rate-limited LLM: back off longer so a free quota is not spent on retries.
+        const errorSleepMs = isCapacityError(err) ? 15 * 60_000 : 300_000;
         db.setKV(
           "sleep_until",
-          new Date(Date.now() + 300_000).toISOString(),
+          new Date(Date.now() + errorSleepMs).toISOString(),
         );
         running = false;
       }

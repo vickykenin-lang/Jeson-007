@@ -24,11 +24,26 @@ import { DEFAULT_ROUTING_MATRIX, TASK_TIMEOUTS } from "./types.js";
 
 type Database = BetterSqlite3.Database;
 
+/** Overload, quota/rate limit, server error or open circuit: worth trying another model. */
+export function isCapacityError(error: unknown): boolean {
+  const err = error as { name?: string; message?: string } | undefined;
+  if (err?.name === "CircuitOpenError") return true;
+  const msg = String(err?.message ?? "");
+  return /Inference error \([a-z]+\): (429|500|502|503|504)\b/.test(msg) || /Circuit breaker is open/.test(msg);
+}
+
+/** A daily (not per-minute) quota is exhausted: retrying soon only wastes requests. */
+export function isDailyQuotaError(error: unknown): boolean {
+  const msg = String((error as { message?: string } | undefined)?.message ?? "");
+  return /\b429\b/.test(msg) && /PerDay|per day/i.test(msg);
+}
+
 export class InferenceRouter {
   private db: Database;
   private registry: ModelRegistry;
   private budget: InferenceBudgetTracker;
   private isUsable: (entry: ModelEntry) => boolean;
+  private hasUsabilityFilter: boolean;
 
   /**
    * @param isUsable Optional filter for models the runtime can actually call
@@ -44,6 +59,7 @@ export class InferenceRouter {
     this.registry = registry;
     this.budget = budget;
     this.isUsable = isUsable ?? (() => true);
+    this.hasUsabilityFilter = Boolean(isUsable);
   }
 
   /**
@@ -54,10 +70,60 @@ export class InferenceRouter {
     request: InferenceRequest,
     inferenceChat: (messages: any[], options: any) => Promise<any>,
   ): Promise<InferenceResult> {
+    const primary = this.selectModel(request.tier, request.taskType);
+    const alternates = primary ? this.fallbackModels(primary) : [];
+    if (alternates.length === 0) return this.routeWith(request, inferenceChat, primary);
+
+    // Standalone with several configured models: when one is overloaded, out of
+    // quota or timing out, try the next one in the same turn. Free tiers count
+    // quota per model, so another model usually still answers.
+    const chain = [primary as ModelEntry, ...alternates];
+    let lastError: unknown;
+    for (let i = 0; i < chain.length; i++) {
+      const isLast = i === chain.length - 1;
+      try {
+        const result = await this.routeWith(request, inferenceChat, chain[i]);
+        if (result.finishReason === "timeout" && !isLast) {
+          lastError = new Error(result.content);
+          continue;
+        }
+        return result;
+      } catch (error) {
+        if (isLast || !isCapacityError(error)) throw error;
+        lastError = error;
+      }
+    }
+    throw lastError;
+  }
+
+  /**
+   * Other configured models to try when the selected one fails for capacity
+   * reasons. Only with a usability filter (standalone mode); with Conway the
+   * routing is unchanged.
+   */
+  private fallbackModels(primary: ModelEntry): ModelEntry[] {
+    if (!this.hasUsabilityFilter) return [];
+    const s = this.budget.config;
+    const ids = [s.inferenceModel, s.lowComputeModel, s.criticalModel];
+    const seen = new Set([primary.modelId]);
+    const out: ModelEntry[] = [];
+    for (const id of ids) {
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      const entry = this.registry.get(id);
+      if (entry && entry.enabled && this.isUsable(entry)) out.push(entry);
+    }
+    return out;
+  }
+
+  private async routeWith(
+    request: InferenceRequest,
+    inferenceChat: (messages: any[], options: any) => Promise<any>,
+    model: ModelEntry | null,
+  ): Promise<InferenceResult> {
     const { messages, taskType, tier, sessionId, turnId, tools } = request;
 
-    // 1. Select model from routing matrix
-    const model = this.selectModel(tier, taskType);
+    // 1. Model chosen by route() from the routing matrix / configured models
     if (!model) {
       return {
         content: "",
