@@ -682,6 +682,15 @@ export async function runAgentLoop(
         (msgs, opts) => inference.chat(msgs, { ...opts, tools: inferenceTools }),
       );
 
+      // No routable model: fail the turn loudly instead of recording an empty "0 tools" turn,
+      // which looked like idle work and put the agent to sleep without an error.
+      if (routerResult.model === "none" && routerResult.finishReason === "error") {
+        throw new Error(
+          `No usable model for tier "${survivalTier}" (configured: ${config.inferenceModel}). ` +
+            "Check inferenceModel and the matching API key / base URL in automaton.json.",
+        );
+      }
+
       // Build a compatible response for the rest of the loop
       const response = {
         message: { content: routerResult.content, role: "assistant" as const },

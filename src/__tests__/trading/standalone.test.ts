@@ -89,6 +89,24 @@ describe("standalone model routing", () => {
     }
   });
 
+  it("custom endpoint model stays routable after a restart (registry.initialize disables non-baseline models)", () => {
+    const keys = { openaiApiKey: "k", openaiBaseUrl: "https://example.test/v1beta/openai", inferenceModel: "gemini-x-flash" };
+    const route = () => {
+      const registry = new ModelRegistry(db.raw);
+      registry.initialize();
+      const strategy: ModelStrategyConfig = { ...DEFAULT_MODEL_STRATEGY_CONFIG };
+      prepareStandaloneModels(registry, strategy, keys);
+      const configured = new Set([strategy.inferenceModel, strategy.lowComputeModel, strategy.criticalModel]);
+      const router = new InferenceRouter(db.raw, registry, new InferenceBudgetTracker(db.raw, strategy), (e) =>
+        isModelUsableStandalone(e, keys, configured),
+      );
+      return router.selectModel("high", "agent_turn")?.modelId;
+    };
+    expect(route()).toBe("gemini-x-flash"); // first start
+    expect(route()).toBe("gemini-x-flash"); // restart on the same database
+    expect(route()).toBe("gemini-x-flash");
+  });
+
   it("with Conway (no filter) routing is unchanged", () => {
     const { router } = setup(db, {}, false);
     expect(router.selectModel("high", "agent_turn")?.modelId).toBe("gpt-5.2");

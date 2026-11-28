@@ -94,7 +94,14 @@ export function prepareStandaloneModels(
     if (existing && config.openaiBaseUrl && existing.provider === "openai" && modelId !== strategy.inferenceModel) {
       return false;
     }
-    if (existing) return existing.enabled && isModelUsableStandalone(existing, config);
+    if (existing) {
+      if (!isModelUsableStandalone(existing, config)) return false;
+      // registry.initialize() disables every model that is not in the static baseline on each
+      // startup, which includes the ones registered here on an earlier run. The creator chose
+      // this model in the config, so turn it back on.
+      if (!existing.enabled) registry.setEnabled(modelId, true);
+      return true;
+    }
     const provider = inferStandaloneProvider(modelId, config);
     if (!provider) return false;
     registry.upsert(standaloneEntry(modelId, provider));
